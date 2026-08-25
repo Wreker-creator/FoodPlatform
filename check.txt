@@ -1,0 +1,18 @@
+// run these commands in this order itself, to check if eveything is working or not
+docker compose ps - should see 8 results, each service and its db
+
+
+// Look for Gin's route list + "Listening and serving HTTP on :8080" / ":8081" with no panic or connection error underneath.
+docker compose logs ${service_name}
+
+docker exec -it order-db psql -U wreker -d order-db -c "\dt"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "\dt"
+
+// Add values to order-db
+curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
+
+// get order from order-db
+curl localhost:8080/orders/1
+
+// get order history
+curl "localhost:8080/orders?customer_id=1"
