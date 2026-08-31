@@ -21,15 +21,17 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, prod
 		Queries:  queries,
 		Producer: producer,
 		reader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers: []string{brokerAddr},
-			Topic:   topic,
-			GroupID: groupID,
+			Brokers:     []string{brokerAddr},
+			Topic:       topic,
+			GroupID:     groupID,
+			StartOffset: kafka.FirstOffset,
 		}),
 	}
 }
 
 // this function will keep running for eternity unless it gets stopped via context gracefully
 func (c *Consumer) Start(ctx context.Context) {
+	slog.Info("consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
 	for {
 		msg, err := c.reader.ReadMessage(ctx)
 		if err != nil {
@@ -46,8 +48,9 @@ func (c *Consumer) Start(ctx context.Context) {
 }
 
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
-	var event OrderCreatedEvent
 
+	var event OrderCreatedEvent
+	slog.Info("received message", "offset", msg.Offset, "key", string(msg.Key))
 	err := json.Unmarshal(msg.Value, &event)
 	if err != nil {
 		return err
