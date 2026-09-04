@@ -1,5 +1,12 @@
 package kafka
 
+import "encoding/json"
+
+type EventEnvelope struct {
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
 // inventory reserved
 type InventoryReservedEvent struct {
 	OrderId int32            `json:"order_id"`

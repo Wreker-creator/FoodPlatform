@@ -93,7 +93,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Reason:  rejectReason,
 		}
 
-		return c.Producer.Publish(ctx, string(msg.Key), rejectedEvent)
+		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
 	}
 
 	reservedEvent := InventoryReservedEvent{
@@ -101,6 +101,6 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		Items:   event.Items,
 	}
 
-	return c.Producer.Publish(ctx, string(msg.Key), reservedEvent)
+	return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
 
 }
