@@ -7,6 +7,16 @@ type EventEnvelope struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
+type OrderCancelledEvent struct {
+	OrderId int32  `json:"order_id"`
+	Reason  string `json:"reason"`
+}
+
+type OrderConfirmedEvent struct {
+	OrderId    int32 `json:"order_id"`
+	CustomerId int32 `json:"customer_id"`
+}
+
 // inventory reserved
 type InventoryReservedEvent struct {
 	OrderId int32            `json:"order_id"`

@@ -57,41 +57,39 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	switch envelope.EventType {
 
 	case "InventoryReserved":
-		// if inventory is reserved, we can
 		var event InventoryReservedEvent
-		err := json.Unmarshal(envelope.Payload, &event)
-		if err != nil {
-			slog.Info("Failed to extract data from the json recieved, InventoryReservedEvent", "error :", err)
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			slog.Error("failed to unmarshal InventoryReservedEvent", "error", err)
 			return err
 		}
-
 		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "AWAITING_PAYMENT",
 		}); err != nil {
-			slog.Error("Failed to update order status", "error", err)
+			slog.Error("failed to update order status", "error", err)
 			return err
 		}
-
-		return c.Producer.Publish(ctx, string(msg.Key), event)
+		// nothing to publish yet — order isn't confirmed until payment succeeds
+		return nil
 
 	case "InventoryRejected":
 		var event InventoryRejectedEvent
-		err := json.Unmarshal(envelope.Payload, &event)
-		if err != nil {
-			slog.Info("Failed to extract data from the json recieved, InventoryRejectedEvent", "error :", err)
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			slog.Error("failed to unmarshal InventoryRejectedEvent", "error", err)
 			return err
 		}
-
 		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "CANCELLED",
 		}); err != nil {
-			slog.Error("Failed to update order status", "error", err)
+			slog.Error("failed to update order status", "error", err)
 			return err
 		}
-
-		return c.Producer.Publish(ctx, string(msg.Key), event)
+		cancelledEvent := OrderCancelledEvent{
+			OrderId: event.OrderId,
+			Reason:  event.Reason,
+		}
+		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
 
 	// case "PaymentSucceeded":
 	// case "PaymentFailed":

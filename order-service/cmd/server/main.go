@@ -30,7 +30,7 @@ func main() {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
-		slog.Error("Failed to connect - ", "error: ", err)
+		log.Fatalf("failed to connect to database: %v", err)
 	}
 
 	defer pool.Close()
