@@ -28,3 +28,9 @@ type OrderCreatedEvent struct {
 	CustomerId int32            `json:"customer_id"`
 	Items      []OrderItemEvent `json:"items"`
 }
+
+type PaymentSucceededEvent struct {
+}
+
+type PaymentFailedEvent struct {
+}
