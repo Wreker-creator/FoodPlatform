@@ -1,5 +1,39 @@
 services:
 
+  payment-db:
+    image: postgres:16-alpine
+    container_name: payment-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${PAYMENT_DB}
+    volumes:
+      - payment-pgdata:/var/lib/postgresql/data
+      - ./payment-service/db/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${PAYMENT_DB}"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  payment-service:
+    build:
+      context: ./payment-service
+    container_name: payment-service
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@payment-db:5432/${PAYMENT_DB}?sslmode=disable
+    ports:
+      - "8082:8082"
+    depends_on:
+      payment-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:                          # <- add this
+        condition: service_completed_successfully
+
   order-db:
     image: postgres:16-alpine
     container_name: order-db
@@ -112,3 +146,4 @@ volumes:
   pgdata:
   inventory-pgdata:
   kafka-data:
+  payment-pgdata:

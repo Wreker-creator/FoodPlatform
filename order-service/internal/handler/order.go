@@ -105,9 +105,11 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	createdItemEvents := make([]kafka.OrderItemEvent, 0)
 	for _, item := range createdItems {
+
 		createdItemEvents = append(createdItemEvents, kafka.OrderItemEvent{
 			ProductId: item.ProductID,
 			Quantity:  item.Quantity,
+			UnitPrice: req.Items[0].UnitPrice,
 		})
 	}
 
@@ -117,7 +119,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		Items:      createdItemEvents,
 	}
 
-	if err := h.producer.Publish(ctx, strconv.Itoa(int(createdOrder.ID)), event); err != nil {
+	if err := h.producer.PublishEvent(ctx, strconv.Itoa(int(createdOrder.ID)), "OrderCreated", event); err != nil {
 		slog.Error("Failed to publish OrderCreated", "error", err, "order_id", createdOrder.ID)
 	}
 

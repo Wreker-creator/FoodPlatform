@@ -21,17 +21,6 @@ func NewProducer(brokerAddr, topic string) *Producer {
 	}
 }
 
-// func (p *Producer) Publish(ctx context.Context, key string, event any) error {
-// 	payload, err := json.Marshal(event)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return p.writer.WriteMessages(ctx, kafka.Message{
-// 		Key:   []byte(key),
-// 		Value: []byte(payload),
-// 	})
-// }
-
 func (p *Producer) PublishEvent(ctx context.Context, key string, eventType string, event any) error {
 
 	payload, err := json.Marshal(event)

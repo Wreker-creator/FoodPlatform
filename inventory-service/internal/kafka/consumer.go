@@ -47,60 +47,128 @@ func (c *Consumer) Start(ctx context.Context) {
 	}
 }
 
-func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
+// func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
-	var event OrderCreatedEvent
-	slog.Info("received message", "offset", msg.Offset, "key", string(msg.Key))
-	err := json.Unmarshal(msg.Value, &event)
-	if err != nil {
+// 	var event EventEnvelope
+// 	slog.Info("received envelope", "offset", msg.Offset, "key", string(msg.Key))
+// 	err := json.Unmarshal(msg.Value, &event)
+// 	if err != nil {
+// 		slog.Info("Unable to unmarshal event envelope", "error", err)
+// 		return err
+// 	}
+
+// 	decremented := make([]OrderItemEvent, 0, len(event.Items))
+// 	rejected := false
+
+// 	var rejectReason string
+
+// 	for _, item := range event.Items {
+// 		rowsAffected, err := c.Queries.DecrementInventory(ctx, store.DecrementInventoryParams{
+// 			ProductID:         item.ProductId,
+// 			AvailableQuantity: item.Quantity,
+// 		})
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if rowsAffected == 0 {
+// 			rejected = true
+// 			rejectReason = fmt.Sprintf("insufficent stock for product id - %d", item.ProductId)
+// 			break
+// 		}
+// 		decremented = append(decremented, item)
+// 	}
+
+// 	if rejected {
+// 		for _, item := range decremented {
+// 			err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+// 				ProductID:         item.ProductId,
+// 				AvailableQuantity: item.Quantity,
+// 			})
+// 			if err != nil {
+// 				return err
+// 			}
+// 		}
+
+// 		rejectedEvent := InventoryRejectedEvent{
+// 			OrderId: event.OrderId,
+// 			Reason:  rejectReason,
+// 		}
+
+// 		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
+// 	}
+
+// 	reservedEvent := InventoryReservedEvent{
+// 		OrderId: event.OrderId,
+// 		Items:   event.Items,
+// 	}
+
+// 	return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
+
+// }
+
+func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
+	var envelope EventEnvelope
+	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
 		return err
 	}
 
-	decremented := make([]OrderItemEvent, 0, len(event.Items))
-	rejected := false
-
-	var rejectReason string
-
-	for _, item := range event.Items {
-		rowsAffected, err := c.Queries.DecrementInventory(ctx, store.DecrementInventoryParams{
-			ProductID:         item.ProductId,
-			AvailableQuantity: item.Quantity,
-		})
-		if err != nil {
+	switch envelope.EventType {
+	case "OrderCreated":
+		var event OrderCreatedEvent
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
 			return err
 		}
-		if rowsAffected == 0 {
-			rejected = true
-			rejectReason = fmt.Sprintf("insufficent stock for product id - %d", item.ProductId)
-			break
-		}
-		decremented = append(decremented, item)
-	}
+		// ... existing decrement/reject logic, unchanged ...
 
-	if rejected {
-		for _, item := range decremented {
-			err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+		decremented := make([]OrderItemEvent, 0, len(event.Items))
+		rejected := false
+
+		var rejectReason string
+
+		for _, item := range event.Items {
+			rowsAffected, err := c.Queries.DecrementInventory(ctx, store.DecrementInventoryParams{
 				ProductID:         item.ProductId,
 				AvailableQuantity: item.Quantity,
 			})
 			if err != nil {
 				return err
 			}
+			if rowsAffected == 0 {
+				rejected = true
+				rejectReason = fmt.Sprintf("insufficent stock for product id - %d", item.ProductId)
+				break
+			}
+			decremented = append(decremented, item)
 		}
 
-		rejectedEvent := InventoryRejectedEvent{
+		if rejected {
+			for _, item := range decremented {
+				err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+					ProductID:         item.ProductId,
+					AvailableQuantity: item.Quantity,
+				})
+				if err != nil {
+					return err
+				}
+			}
+
+			rejectedEvent := InventoryRejectedEvent{
+				OrderId: event.OrderId,
+				Reason:  rejectReason,
+			}
+
+			return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
+		}
+
+		reservedEvent := InventoryReservedEvent{
 			OrderId: event.OrderId,
-			Reason:  rejectReason,
+			Items:   event.Items,
 		}
 
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
+		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
+
+	default:
+		slog.Warn("unhandled event type", "event_type", envelope.EventType)
 	}
-
-	reservedEvent := InventoryReservedEvent{
-		OrderId: event.OrderId,
-		Items:   event.Items,
-	}
-
-	return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
-
+	return nil
 }

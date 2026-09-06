@@ -29,8 +29,9 @@ type InventoryRejectedEvent struct {
 }
 
 type OrderItemEvent struct {
-	ProductId int32 `json:"product_id"`
-	Quantity  int32 `json:"quantity"`
+	ProductId int32   `json:"product_id" required:"true"`
+	Quantity  int32   `json:"quantity" required:"true"`
+	UnitPrice float64 `json:"unit_price" required:"true"`
 }
 
 type OrderCreatedEvent struct {
@@ -40,7 +41,14 @@ type OrderCreatedEvent struct {
 }
 
 type PaymentSucceededEvent struct {
+	OrderId   int32   `json:"order_id"`
+	PaymentId int32   `json:"payment_id"`
+	Amount    float64 `json:"amount"`
 }
 
 type PaymentFailedEvent struct {
+	OrderId   int32   `json:"order_id"`
+	PaymentId int32   `json:"payment_id"`
+	Amount    float64 `json:"amount"`
+	Reason    string  `json:"reason"`
 }

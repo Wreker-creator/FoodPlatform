@@ -91,8 +91,57 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
 
-	// case "PaymentSucceeded":
-	// case "PaymentFailed":
+	case "PaymentSucceeded":
+		var event PaymentSucceededEvent
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			slog.Error("failed to unmarshal PaymentSucceededEvent", "error", err)
+			return err
+		}
+
+		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+			ID:     event.OrderId,
+			Status: "CONFIRMED",
+		}); err != nil {
+			slog.Error("failed to update order status", "error", err)
+			return err
+		}
+
+		order, err := c.Queries.GetOrderByID(ctx, event.OrderId)
+		if err != nil {
+			slog.Error("Failed to get order by id", "error:", err)
+			return err
+		}
+
+		orderConfirmedEvent := OrderConfirmedEvent{
+			OrderId:    event.OrderId,
+			CustomerId: order.CustomerID,
+		}
+
+		// what to do after payment has succeeded? send a notification that payment is completed
+		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderConfirmed", orderConfirmedEvent)
+
+	case "PaymentFailed":
+
+		var event PaymentFailedEvent
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			slog.Error("failed to unmarshal PaymentFailedEvent", "error", err)
+			return err
+		}
+
+		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+			ID:     event.OrderId,
+			Status: "CANCELLED",
+		}); err != nil {
+			slog.Error("failed to update order status", "error", err)
+			return err
+		}
+
+		cancelledEvent := OrderCancelledEvent{
+			OrderId: event.OrderId,
+			Reason:  event.Reason,
+		}
+		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
+
 	default:
 		slog.Warn("unknown event type", "event_type", envelope.EventType)
 	}

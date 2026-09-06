@@ -1,0 +1,22 @@
+CREATE TABLE payments(
+    id SERIAL PRIMARY KEY,
+    order_id INT NOT NULL,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('PENDING','SUCCEEDED','FAILED')),
+    amount DECIMAL(10, 2) NOT NULL,
+    payment_mode VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP   
+);
+
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER set_updated_at
+BEFORE UPDATE ON payments
+FOR EACH ROW EXECUTE 
+FUNCTION update_updated_at();
