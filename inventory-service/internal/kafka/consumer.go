@@ -47,65 +47,6 @@ func (c *Consumer) Start(ctx context.Context) {
 	}
 }
 
-// func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
-
-// 	var event EventEnvelope
-// 	slog.Info("received envelope", "offset", msg.Offset, "key", string(msg.Key))
-// 	err := json.Unmarshal(msg.Value, &event)
-// 	if err != nil {
-// 		slog.Info("Unable to unmarshal event envelope", "error", err)
-// 		return err
-// 	}
-
-// 	decremented := make([]OrderItemEvent, 0, len(event.Items))
-// 	rejected := false
-
-// 	var rejectReason string
-
-// 	for _, item := range event.Items {
-// 		rowsAffected, err := c.Queries.DecrementInventory(ctx, store.DecrementInventoryParams{
-// 			ProductID:         item.ProductId,
-// 			AvailableQuantity: item.Quantity,
-// 		})
-// 		if err != nil {
-// 			return err
-// 		}
-// 		if rowsAffected == 0 {
-// 			rejected = true
-// 			rejectReason = fmt.Sprintf("insufficent stock for product id - %d", item.ProductId)
-// 			break
-// 		}
-// 		decremented = append(decremented, item)
-// 	}
-
-// 	if rejected {
-// 		for _, item := range decremented {
-// 			err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
-// 				ProductID:         item.ProductId,
-// 				AvailableQuantity: item.Quantity,
-// 			})
-// 			if err != nil {
-// 				return err
-// 			}
-// 		}
-
-// 		rejectedEvent := InventoryRejectedEvent{
-// 			OrderId: event.OrderId,
-// 			Reason:  rejectReason,
-// 		}
-
-// 		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
-// 	}
-
-// 	reservedEvent := InventoryReservedEvent{
-// 		OrderId: event.OrderId,
-// 		Items:   event.Items,
-// 	}
-
-// 	return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
-
-// }
-
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	var envelope EventEnvelope
 	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
@@ -166,6 +107,31 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
+
+	case "OrderCancelled":
+		var event OrderCancelledEvent
+		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+			slog.Error("failed to unmarshal OrderCancelledEvent", "error", err)
+			return err
+		}
+
+		if !event.ReleaseInventory {
+			slog.Info("Release inventory variable was set as false")
+			return nil // nothing to release
+		}
+
+		for _, item := range event.Items {
+			if err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+				ProductID:         item.ProductId,
+				AvailableQuantity: item.Quantity,
+			}); err != nil {
+				slog.Error("failed to release inventory", "error", err)
+				return err
+			}
+		}
+
+		// doesnt publish anything because the order is cancelled and inventory is released, so just return nil
+		return nil
 
 	default:
 		slog.Warn("unhandled event type", "event_type", envelope.EventType)

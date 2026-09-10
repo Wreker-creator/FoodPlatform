@@ -29,3 +29,10 @@ type OrderCreatedEvent struct {
 	CustomerId int32            `json:"customer_id"`
 	Items      []OrderItemEvent `json:"items"`
 }
+
+type OrderCancelledEvent struct {
+	OrderId          int32            `json:"order_id"`
+	Reason           string           `json:"reason"`
+	Items            []OrderItemEvent `json:"items,omitempty"`
+	ReleaseInventory bool             `json:"release_inventory"`
+}

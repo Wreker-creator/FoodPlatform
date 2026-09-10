@@ -8,8 +8,10 @@ type EventEnvelope struct {
 }
 
 type OrderCancelledEvent struct {
-	OrderId int32  `json:"order_id"`
-	Reason  string `json:"reason"`
+	OrderId          int32            `json:"order_id"`
+	Reason           string           `json:"reason"`
+	Items            []OrderItemEvent `json:"items,omitempty"`
+	ReleaseInventory bool             `json:"release_inventory"`
 }
 
 type OrderConfirmedEvent struct {

@@ -85,9 +85,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			slog.Error("failed to update order status", "error", err)
 			return err
 		}
+
 		cancelledEvent := OrderCancelledEvent{
-			OrderId: event.OrderId,
-			Reason:  event.Reason,
+			OrderId:          event.OrderId,
+			Reason:           event.Reason,
+			ReleaseInventory: false,
 		}
 		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
 
@@ -136,9 +138,25 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
+		orderItems, err := c.Queries.GetOrderItemsByOrderId(ctx, event.OrderId)
+		if err != nil {
+			slog.Error("failed to fetch order items for cancellation", "error", err)
+			return err
+		}
+		eventItems := make([]OrderItemEvent, 0, len(orderItems))
+		for _, item := range orderItems {
+			eventItems = append(eventItems, OrderItemEvent{
+				ProductId: item.ProductID,
+				Quantity:  item.Quantity,
+				// UnitPrice not needed here — Inventory only cares about quantity to release
+			})
+		}
+
 		cancelledEvent := OrderCancelledEvent{
-			OrderId: event.OrderId,
-			Reason:  event.Reason,
+			OrderId:          event.OrderId,
+			Reason:           event.Reason,
+			Items:            eventItems,
+			ReleaseInventory: true, // signal to Inventory service to release reserved stock
 		}
 		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
 
