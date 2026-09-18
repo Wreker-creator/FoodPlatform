@@ -1,18 +1,73 @@
-// run these commands in this order itself, to check if eveything is working or not
-docker compose ps - should see 8 results, each service and its db
+# ============================================
+# 1. FULL CLEAN REBUILD
+# ============================================
+docker compose down -v
+docker compose build --no-cache
+docker compose up -d
+sleep 25
+docker compose ps
+docker compose logs kafka-init
 
+# ============================================
+# 2. CONFIRM ALL CONSUMERS + PUBLISHERS STARTED
+# ============================================
+docker compose logs order-service | grep -iE "consumer starting|publisher starting"
+docker compose logs inventory-service | grep "consumer starting"
+docker compose logs payment-service | grep "consumer starting"
+# Expect: order-service shows 2 consumers + 1 publisher; inventory/payment show 1 consumer each
 
-// Look for Gin's route list + "Listening and serving HTTP on :8080" / ":8081" with no panic or connection error underneath.
-docker compose logs ${service_name}
+# ============================================
+# 3. SEED INVENTORY
+# ============================================
+curl -X POST localhost:8081/inventory -H "Content-Type: application/json" -d '{"product_id":1,"quantity":100}'
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+# Expect: available_quantity: 100
 
-docker exec -it order-db psql -U wreker -d order-db -c "\dt"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "\dt"
-
-// Add values to order-db
+# ============================================
+# 4. SUCCESS PATH (order under 1000)
+# ============================================
 curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
+sleep 5
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox;"
+sleep 3
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox;"
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 1;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 1;"
+# Expect: outbox row published:true, order CONFIRMED, stock 98, payment SUCCEEDED
 
-// get order from order-db
-curl localhost:8080/orders/1
+# ============================================
+# 5. PAYMENT-FAILURE PATH (order over 1000)
+# ============================================
+curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":600}]}'
+sleep 10
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 2;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 2;"
+# Expect: order CANCELLED, stock back to 98 (released), payment FAILED with a reason
 
-// get order history
-curl "localhost:8080/orders?customer_id=1"
+# ============================================
+# 6. INVENTORY-REJECTION PATH (excessive quantity)
+# ============================================
+curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":9999,"unit_price":9.99}]}'
+sleep 10
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 3;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 3;"
+# Expect: order CANCELLED, stock unchanged at 98, no payment row
+
+# ============================================
+# 7. KAFKA-LEVEL SANITY CHECK
+# ============================================
+docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-events
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic inventory-events
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment-events
+
+# ============================================
+# 8. ERROR SWEEP — catch anything silent
+# ============================================
+docker compose logs order-service | grep -i error
+docker compose logs inventory-service | grep -i error
+docker compose logs payment-service | grep -i error
+# Expect: empty, or only expected rejection/failure logs from steps 5-6

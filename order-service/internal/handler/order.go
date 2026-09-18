@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,15 +13,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type OrderHandler struct {
 	Queries  *store.Queries
 	producer *kafka.Producer
+	Pool     *pgxpool.Pool
 }
 
-func NewOrderHandler(queries *store.Queries, producer *kafka.Producer) *OrderHandler {
-	return &OrderHandler{Queries: queries, producer: producer}
+func NewOrderHandler(queries *store.Queries, producer *kafka.Producer, pool *pgxpool.Pool) *OrderHandler {
+	return &OrderHandler{Queries: queries, producer: producer, Pool: pool}
 }
 
 // the functions added here are the representation of the public api endpoints, the ones
@@ -64,7 +67,17 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	createdOrder, err := h.Queries.CreateOrder(ctx, store.CreateOrderParams{
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		slog.Error("failed to begin transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := h.Queries.WithTx(tx)
+
+	createdOrder, err := qtx.CreateOrder(ctx, store.CreateOrderParams{
 		CustomerID:  req.CustomerID,
 		TotalAmount: totalAmountNumeric,
 		Status:      "PENDING",
@@ -86,7 +99,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 			return
 		}
 
-		createdItem, err := h.Queries.CreateOrderItem(ctx, store.CreateOrderItemParams{
+		createdItem, err := qtx.CreateOrderItem(ctx, store.CreateOrderItemParams{
 			OrderID:   createdOrder.ID,
 			ProductID: item.ProductID,
 			Quantity:  item.Quantity,
@@ -105,11 +118,16 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	createdItemEvents := make([]kafka.OrderItemEvent, 0)
 	for _, item := range createdItems {
-
+		priceFloat, err := item.UnitPrice.Float64Value()
+		if err != nil {
+			slog.Error("failed to convert unit price", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to process order items"})
+			return
+		}
 		createdItemEvents = append(createdItemEvents, kafka.OrderItemEvent{
 			ProductId: item.ProductID,
 			Quantity:  item.Quantity,
-			UnitPrice: req.Items[0].UnitPrice,
+			UnitPrice: priceFloat.Float64,
 		})
 	}
 
@@ -119,8 +137,30 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		Items:      createdItemEvents,
 	}
 
-	if err := h.producer.PublishEvent(ctx, strconv.Itoa(int(createdOrder.ID)), "OrderCreated", event); err != nil {
-		slog.Error("Failed to publish OrderCreated", "error", err, "order_id", createdOrder.ID)
+	payloadBytes, err := json.Marshal(event)
+	if err != nil {
+		slog.Error("Failed to marshal order created event, order-service", "Error - ", err)
+		return
+	}
+
+	if _, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+		AggregateKey: strconv.Itoa(int(createdOrder.ID)),
+		EventType:    "OrderCreated",
+		Payload:      payloadBytes,
+	}); err != nil {
+		slog.Error("failed to insert outbox event", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to record order event"})
+		return
+	}
+
+	// if err := h.producer.PublishEvent(ctx, strconv.Itoa(int(createdOrder.ID)), "OrderCreated", event); err != nil {
+	// 	slog.Error("Failed to publish OrderCreated", "error", err, "order_id", createdOrder.ID)
+	// }
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("failed to commit order transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to create order"})
+		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{

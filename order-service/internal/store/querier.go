@@ -13,7 +13,10 @@ type Querier interface {
 	CreateOrderItem(ctx context.Context, arg CreateOrderItemParams) (OrderItem, error)
 	GetOrderByID(ctx context.Context, id int32) (Order, error)
 	GetOrderItemsByOrderId(ctx context.Context, orderID int32) ([]OrderItem, error)
+	GetUnpublishedOutboxEvents(ctx context.Context) ([]Outbox, error)
+	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) (Outbox, error)
 	ListOrdersByCustomer(ctx context.Context, customerID int32) ([]Order, error)
+	MarkOutboxEventPublished(ctx context.Context, id int32) error
 	UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusParams) error
 }
 
