@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"payment-service/internal/store"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -15,9 +17,10 @@ type Consumer struct {
 	reader   *kafka.Reader
 	Queries  *store.Queries
 	Producer *Producer
+	Pool     *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
 		Queries:  queries,
 		Producer: producer,
@@ -27,6 +30,7 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, prod
 			GroupID:     groupID,
 			StartOffset: kafka.FirstOffset,
 		}),
+		Pool: pool,
 	}
 }
 
@@ -57,6 +61,16 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return err
 	}
 
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		slog.Error("Failed to begin transaction", "error", err)
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+
+	qtx := c.Queries.WithTx(tx)
+
 	switch envelope.EventType {
 
 	case "InventoryReserved":
@@ -78,7 +92,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		createdPayment, err := c.Queries.CreatePayment(ctx, store.CreatePaymentParams{
+		createdPayment, err := qtx.CreatePayment(ctx, store.CreatePaymentParams{
 			OrderID:     event.OrderId,
 			Status:      "PENDING",
 			Amount:      totalAmountNumeric,
@@ -92,7 +106,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		if totalAmount > 1000 {
 
-			payment, err := c.Queries.UpdatePaymentStatus(ctx, store.UpdatePaymentStatusParams{
+			payment, err := qtx.UpdatePaymentStatus(ctx, store.UpdatePaymentStatusParams{
 				ID:     createdPayment.ID,
 				Status: "FAILED",
 			})
@@ -109,10 +123,24 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				Reason:    "Amount too high",
 			}
 
-			return c.Producer.PublishEvent(ctx, string(msg.Key), "PaymentFailed", paymentRejectedEvent)
+			payloadBytes, err := json.Marshal(paymentRejectedEvent)
+			if err != nil {
+				slog.Error("failed to marshall paymentFailedEvent")
+			}
+
+			if _, err := qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+				AggregateKey: strconv.Itoa(int(paymentRejectedEvent.OrderId)),
+				EventType:    "PaymentFailed",
+				Payload:      payloadBytes,
+			}); err != nil {
+				slog.Error("Failed to insert payment Failed outbox event", "error: ", err)
+				return err
+			}
+
+			return nil
 		}
 
-		updatedPayment, err := c.Queries.UpdatePaymentStatus(ctx, store.UpdatePaymentStatusParams{
+		updatedPayment, err := qtx.UpdatePaymentStatus(ctx, store.UpdatePaymentStatusParams{
 			ID:     createdPayment.ID,
 			Status: "SUCCEEDED",
 		})
@@ -127,7 +155,21 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Amount:    totalAmount,
 		}
 
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "PaymentSucceeded", paymentSucceededEvent)
+		payloadBytes, err := json.Marshal(paymentSucceededEvent)
+		if err != nil {
+			slog.Error("failed to marshall paymentFailedEvent")
+		}
+
+		if _, err := qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+			AggregateKey: strconv.Itoa(int(paymentSucceededEvent.OrderId)),
+			EventType:    "PaymentSucceeded",
+			Payload:      payloadBytes,
+		}); err != nil {
+			slog.Error("Failed to insert payment Failed outbox event", "error: ", err)
+			return err
+		}
+
+		return nil
 
 	default:
 		slog.Warn("unknown event type", "event_type", envelope.EventType)

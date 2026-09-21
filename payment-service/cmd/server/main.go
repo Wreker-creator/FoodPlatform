@@ -37,7 +37,7 @@ func main() {
 	paymentHandler := handler.NewPaymentHandler(queries)
 
 	producer := kafka.NewProducer("kafka:9094", "payment-events")
-	consumer := kafka.NewConsumer("kafka:9094", "inventory-events", "payment-inventory-group", queries, producer)
+	consumer := kafka.NewConsumer("kafka:9094", "inventory-events", "payment-inventory-group", queries, producer, pool)
 
 	go consumer.Start(ctx)
 

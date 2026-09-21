@@ -8,6 +8,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Outbox struct {
+	ID           int32            `json:"id"`
+	AggregateKey string           `json:"aggregate_key"`
+	EventType    string           `json:"event_type"`
+	Payload      []byte           `json:"payload"`
+	Published    bool             `json:"published"`
+	CreatedAt    pgtype.Timestamp `json:"created_at"`
+}
+
 type Payment struct {
 	ID          int32            `json:"id"`
 	OrderID     int32            `json:"order_id"`

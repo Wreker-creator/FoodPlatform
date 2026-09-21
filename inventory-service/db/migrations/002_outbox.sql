@@ -1,0 +1,8 @@
+CREATE TABLE outbox(
+    id SERIAL PRIMARY KEY,
+    aggregate_key VARCHAR(255) NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    payload JSONB NOT NULL,
+    published BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

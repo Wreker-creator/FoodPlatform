@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"inventory-service/internal/store"
 	"log/slog"
+	"strconv"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -14,12 +16,14 @@ type Consumer struct {
 	reader   *kafka.Reader
 	Queries  *store.Queries
 	Producer *Producer
+	Pool     *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
 		Queries:  queries,
 		Producer: producer,
+		Pool:     pool,
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
 			Topic:       topic,
@@ -53,6 +57,16 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return err
 	}
 
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		slog.Error("Failed to begin transaction", "error", err)
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+
+	qtx := c.Queries.WithTx(tx)
+
 	switch envelope.EventType {
 	case "OrderCreated":
 		var event OrderCreatedEvent
@@ -67,7 +81,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		var rejectReason string
 
 		for _, item := range event.Items {
-			rowsAffected, err := c.Queries.DecrementInventory(ctx, store.DecrementInventoryParams{
+			rowsAffected, err := qtx.DecrementInventory(ctx, store.DecrementInventoryParams{
 				ProductID:         item.ProductId,
 				AvailableQuantity: item.Quantity,
 			})
@@ -84,7 +98,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		if rejected {
 			for _, item := range decremented {
-				err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+				err := qtx.IncrementInventory(ctx, store.IncrementInventoryParams{
 					ProductID:         item.ProductId,
 					AvailableQuantity: item.Quantity,
 				})
@@ -98,7 +112,28 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				Reason:  rejectReason,
 			}
 
-			return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryRejected", rejectedEvent)
+			payloadBytes, err := json.Marshal(rejectedEvent)
+			if err != nil {
+				slog.Error("failed to marshal InventoryRejectedEvent", "error", err)
+				return err
+			}
+
+			if _, err := qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+				AggregateKey: strconv.Itoa(int(rejectedEvent.OrderId)),
+				EventType:    "InventoryRejected",
+				Payload:      payloadBytes,
+			}); err != nil {
+				slog.Error("Failed to insert outbox event", "error: ", err)
+				return err
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				slog.Error("Failed to commit order transaction", "error", err)
+				return err
+			}
+
+			return nil
+
 		}
 
 		reservedEvent := InventoryReservedEvent{
@@ -106,7 +141,25 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Items:   event.Items,
 		}
 
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "InventoryReserved", reservedEvent)
+		payloadBytes, err := json.Marshal(reservedEvent)
+		if err != nil {
+			slog.Error("failed to marshal InventoryReservedEvent", "error", err)
+			return err
+		}
+
+		if _, err := qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+			AggregateKey: strconv.Itoa(int(reservedEvent.OrderId)),
+			EventType:    "InventoryReserved",
+			Payload:      payloadBytes,
+		}); err != nil {
+			slog.Error("Failed to insert outbox event", "error: ", err)
+			return err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit order transaction", "error", err)
+			return err
+		}
 
 	case "OrderCancelled":
 		var event OrderCancelledEvent
@@ -121,13 +174,18 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		for _, item := range event.Items {
-			if err := c.Queries.IncrementInventory(ctx, store.IncrementInventoryParams{
+			if err := qtx.IncrementInventory(ctx, store.IncrementInventoryParams{
 				ProductID:         item.ProductId,
 				AvailableQuantity: item.Quantity,
 			}); err != nil {
 				slog.Error("failed to release inventory", "error", err)
 				return err
 			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit order transaction", "error", err)
+			return err
 		}
 
 		// doesnt publish anything because the order is cancelled and inventory is released, so just return nil

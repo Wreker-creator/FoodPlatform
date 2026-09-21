@@ -12,7 +12,10 @@ type Querier interface {
 	CreateInventory(ctx context.Context, arg CreateInventoryParams) (Inventory, error)
 	DecrementInventory(ctx context.Context, arg DecrementInventoryParams) (int64, error)
 	GetInventoryByProductId(ctx context.Context, productID int32) (Inventory, error)
+	GetUnpublishedOutboxEvents(ctx context.Context) ([]Outbox, error)
 	IncrementInventory(ctx context.Context, arg IncrementInventoryParams) error
+	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) (Outbox, error)
+	MarkOutboxEventPublished(ctx context.Context, id int32) error
 }
 
 var _ Querier = (*Queries)(nil)

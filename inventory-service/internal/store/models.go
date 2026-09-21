@@ -14,3 +14,12 @@ type Inventory struct {
 	CreatedAt         pgtype.Timestamp `json:"created_at"`
 	UpdatedAt         pgtype.Timestamp `json:"updated_at"`
 }
+
+type Outbox struct {
+	ID           int32            `json:"id"`
+	AggregateKey string           `json:"aggregate_key"`
+	EventType    string           `json:"event_type"`
+	Payload      []byte           `json:"payload"`
+	Published    bool             `json:"published"`
+	CreatedAt    pgtype.Timestamp `json:"created_at"`
+}

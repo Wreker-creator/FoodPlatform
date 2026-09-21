@@ -37,7 +37,7 @@ func main() {
 	inventoryHandler := handler.NewInventoryHandler(queries)
 
 	producer := kafka.NewProducer("kafka:9094", "inventory-events")
-	consumer := kafka.NewConsumer("kafka:9094", "order-events", "inventory-service-group", queries, producer)
+	consumer := kafka.NewConsumer("kafka:9094", "order-events", "inventory-service-group", queries, producer, pool)
 
 	go consumer.Start(ctx)
 
