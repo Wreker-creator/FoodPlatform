@@ -36,10 +36,11 @@ func main() {
 	queries := store.New(pool)
 	paymentHandler := handler.NewPaymentHandler(queries)
 
-	producer := kafka.NewProducer("kafka:9094", "payment-events")
-	consumer := kafka.NewConsumer("kafka:9094", "inventory-events", "payment-inventory-group", queries, producer, pool)
+	consumer := kafka.NewConsumer("kafka:9094", "inventory-events", "payment-inventory-group", queries, pool)
+	publisher := kafka.NewPublisher(queries, "payment-events", "kafka:9094")
 
 	go consumer.Start(ctx)
+	go publisher.Start(ctx)
 
 	router.GET("/payments/:id", paymentHandler.GetPaymentByID)
 	router.GET("/payments", paymentHandler.GetPaymentsByOrder)

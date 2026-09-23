@@ -17,13 +17,12 @@ import (
 )
 
 type OrderHandler struct {
-	Queries  *store.Queries
-	producer *kafka.Producer
-	Pool     *pgxpool.Pool
+	Queries *store.Queries
+	Pool    *pgxpool.Pool
 }
 
-func NewOrderHandler(queries *store.Queries, producer *kafka.Producer, pool *pgxpool.Pool) *OrderHandler {
-	return &OrderHandler{Queries: queries, producer: producer, Pool: pool}
+func NewOrderHandler(queries *store.Queries, pool *pgxpool.Pool) *OrderHandler {
+	return &OrderHandler{Queries: queries, Pool: pool}
 }
 
 // the functions added here are the representation of the public api endpoints, the ones

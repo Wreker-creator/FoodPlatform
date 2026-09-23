@@ -14,16 +14,14 @@ import (
 )
 
 type Consumer struct {
-	reader   *kafka.Reader
-	Queries  *store.Queries
-	Producer *Producer
-	Pool     *pgxpool.Pool
+	reader  *kafka.Reader
+	Queries *store.Queries
+	Pool    *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer, pool *pgxpool.Pool) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
-		Queries:  queries,
-		Producer: producer,
+		Queries: queries,
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
 			Topic:       topic,
@@ -137,6 +135,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				return err
 			}
 
+			if err := tx.Commit(ctx); err != nil {
+				slog.Error("Failed to commut payment transaction", "error: ", err)
+				return err
+			}
+
 			return nil
 		}
 
@@ -166,6 +169,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Payload:      payloadBytes,
 		}); err != nil {
 			slog.Error("Failed to insert payment Failed outbox event", "error: ", err)
+			return err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commut payment transaction", "error: ", err)
 			return err
 		}
 

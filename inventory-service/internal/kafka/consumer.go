@@ -13,17 +13,15 @@ import (
 )
 
 type Consumer struct {
-	reader   *kafka.Reader
-	Queries  *store.Queries
-	Producer *Producer
-	Pool     *pgxpool.Pool
+	reader  *kafka.Reader
+	Queries *store.Queries
+	Pool    *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer, pool *pgxpool.Pool) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
-		Queries:  queries,
-		Producer: producer,
-		Pool:     pool,
+		Queries: queries,
+		Pool:    pool,
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
 			Topic:       topic,

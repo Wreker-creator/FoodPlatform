@@ -5,26 +5,28 @@ import (
 	"encoding/json"
 	"log/slog"
 	"order-service/internal/store"
+	"strconv"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
 type Consumer struct {
-	reader   *kafka.Reader
-	Queries  *store.Queries
-	Producer *Producer
+	reader  *kafka.Reader
+	Queries *store.Queries
+	Pool    *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, producer *Producer) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
-		Queries:  queries,
-		Producer: producer,
+		Queries: queries,
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
 			Topic:       topic,
 			GroupID:     groupID,
 			StartOffset: kafka.FirstOffset,
 		}),
+		Pool: pool,
 	}
 }
 
@@ -54,6 +56,15 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return err
 	}
 
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		slog.Error("Failed to begin transactions", "error: ", err)
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+	qtx := c.Queries.WithTx(tx)
+
 	switch envelope.EventType {
 
 	case "InventoryReserved":
@@ -62,14 +73,14 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			slog.Error("failed to unmarshal InventoryReservedEvent", "error", err)
 			return err
 		}
-		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "AWAITING_PAYMENT",
 		}); err != nil {
 			slog.Error("failed to update order status", "error", err)
 			return err
 		}
-		// nothing to publish yet — order isn't confirmed until payment succeeds
+
 		return nil
 
 	case "InventoryRejected":
@@ -78,7 +89,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			slog.Error("failed to unmarshal InventoryRejectedEvent", "error", err)
 			return err
 		}
-		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "CANCELLED",
 		}); err != nil {
@@ -91,7 +102,29 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Reason:           event.Reason,
 			ReleaseInventory: false,
 		}
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
+
+		payloadBytes, err := json.Marshal(cancelledEvent)
+		if err != nil {
+			slog.Error("Failed to marhsal the event", "error: ", err)
+			return err
+		}
+
+		_, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+			AggregateKey: strconv.Itoa(int(cancelledEvent.OrderId)),
+			EventType:    "OrderCancelled",
+			Payload:      payloadBytes,
+		})
+
+		if err != nil {
+			slog.Error("failed to insert outbox event", "error", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			return err
+		}
+
+		return err
 
 	case "PaymentSucceeded":
 		var event PaymentSucceededEvent
@@ -100,7 +133,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "CONFIRMED",
 		}); err != nil {
@@ -108,7 +141,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		order, err := c.Queries.GetOrderByID(ctx, event.OrderId)
+		order, err := qtx.GetOrderByID(ctx, event.OrderId)
 		if err != nil {
 			slog.Error("Failed to get order by id", "error:", err)
 			return err
@@ -119,8 +152,28 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			CustomerId: order.CustomerID,
 		}
 
-		// what to do after payment has succeeded? send a notification that payment is completed
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderConfirmed", orderConfirmedEvent)
+		payloadBytes, err := json.Marshal(orderConfirmedEvent)
+		if err != nil {
+			slog.Error("Failed to marshal orderConfirmedEvent", "error: ", err)
+			return err
+		}
+
+		_, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+			AggregateKey: strconv.Itoa(int(orderConfirmedEvent.OrderId)),
+			EventType:    "OrderConfirmed",
+			Payload:      payloadBytes,
+		})
+
+		if err != nil {
+			slog.Error("Failed to insert outbox event, orderConfirmedEvent")
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			return err
+		}
+
+		return err
 
 	case "PaymentFailed":
 
@@ -130,7 +183,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		if err := c.Queries.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
+		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
 			ID:     event.OrderId,
 			Status: "CANCELLED",
 		}); err != nil {
@@ -138,7 +191,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		orderItems, err := c.Queries.GetOrderItemsByOrderId(ctx, event.OrderId)
+		orderItems, err := qtx.GetOrderItemsByOrderId(ctx, event.OrderId)
 		if err != nil {
 			slog.Error("failed to fetch order items for cancellation", "error", err)
 			return err
@@ -158,7 +211,29 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			Items:            eventItems,
 			ReleaseInventory: true, // signal to Inventory service to release reserved stock
 		}
-		return c.Producer.PublishEvent(ctx, string(msg.Key), "OrderCancelled", cancelledEvent)
+
+		payloadBytes, err := json.Marshal(cancelledEvent)
+		if err != nil {
+			slog.Error("Failed to marshal order cancelled event", "error: ", err)
+			return err
+		}
+
+		_, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
+			AggregateKey: strconv.Itoa(int(cancelledEvent.OrderId)),
+			EventType:    "OrderCancelled",
+			Payload:      payloadBytes,
+		})
+
+		if err != nil {
+			slog.Error("Failed to insert outbox event", "error: ", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			return err
+		}
+
+		return err
 
 	default:
 		slog.Warn("unknown event type", "event_type", envelope.EventType)

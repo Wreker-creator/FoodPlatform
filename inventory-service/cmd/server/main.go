@@ -36,10 +36,11 @@ func main() {
 	queries := store.New(pool)
 	inventoryHandler := handler.NewInventoryHandler(queries)
 
-	producer := kafka.NewProducer("kafka:9094", "inventory-events")
-	consumer := kafka.NewConsumer("kafka:9094", "order-events", "inventory-service-group", queries, producer, pool)
+	consumer := kafka.NewConsumer("kafka:9094", "order-events", "inventory-service-group", queries, pool)
+	publisher := kafka.NewPublisher(queries, "inventory-service", "kafka:9094")
 
 	go consumer.Start(ctx)
+	go publisher.Start(ctx)
 
 	// public api endpoints
 	router.POST("/inventory", inventoryHandler.CreateInventory)
