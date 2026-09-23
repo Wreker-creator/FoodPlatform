@@ -37,7 +37,7 @@ func main() {
 
 	queries := store.New(pool)
 	// producer := kafka.NewProducer("kafka:9094", "order-events")
-	publisher := kafka.NewPublisher(queries, "order-service", "kafka:9094")
+	publisher := kafka.NewPublisher(queries, "order-events", "kafka:9094")
 
 	orderHandler := handler.NewOrderHandler(queries, pool)
 

@@ -29,9 +29,9 @@ func NewPublisher(queries *store.Queries, topic, brokerAddr string) *Publisher {
 
 func (p *Publisher) Start(ctx context.Context) {
 
-	slog.Info("Outbox Publisher starting")
+	slog.Info("Outbox Publisher starting for Order Service")
 
-	ticker := time.NewTicker(100 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
 		events, err := p.Queries.GetUnpublishedOutboxEvents(ctx)
 		if err != nil {

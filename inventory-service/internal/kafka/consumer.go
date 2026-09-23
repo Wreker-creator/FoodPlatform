@@ -125,10 +125,10 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				return err
 			}
 
-			if err := tx.Commit(ctx); err != nil {
-				slog.Error("Failed to commit order transaction", "error", err)
-				return err
-			}
+			// if err := tx.Commit(ctx); err != nil {
+			// 	slog.Error("Failed to commit order transaction", "error", err)
+			// 	return err
+			// }
 
 			return nil
 
@@ -181,10 +181,10 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			}
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit order transaction", "error", err)
-			return err
-		}
+		// if err := tx.Commit(ctx); err != nil {
+		// 	slog.Error("Failed to commit order transaction", "error", err)
+		// 	return err
+		// }
 
 		// doesnt publish anything because the order is cancelled and inventory is released, so just return nil
 		return nil

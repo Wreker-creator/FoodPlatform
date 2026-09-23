@@ -12,9 +12,9 @@ docker compose logs kafka-init
 # 2. CONFIRM ALL CONSUMERS + PUBLISHERS STARTED
 # ============================================
 docker compose logs order-service | grep -iE "consumer starting|publisher starting"
-docker compose logs inventory-service | grep "consumer starting"
-docker compose logs payment-service | grep "consumer starting"
-# Expect: order-service shows 2 consumers + 1 publisher; inventory/payment show 1 consumer each
+docker compose logs inventory-service | grep -iE "consumer starting|publisher starting"
+docker compose logs payment-service | grep -iE "consumer starting|publisher starting"
+# Expect: order-service shows 2 consumers + 1 publisher; inventory/payment show 1 consumer and publisher each
 
 # ============================================
 # 3. SEED INVENTORY

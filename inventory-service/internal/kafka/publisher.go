@@ -29,7 +29,7 @@ func NewPublisher(queries *store.Queries, topic, brokerAddr string) *Publisher {
 
 func (p *Publisher) Start(ctx context.Context) {
 
-	slog.Info("Outbox Publisher starting")
+	slog.Info("Outbox Publisher starting for Inventory Service")
 
 	ticker := time.NewTicker(5 * time.Second) // reducing the ticker now
 	for range ticker.C {
