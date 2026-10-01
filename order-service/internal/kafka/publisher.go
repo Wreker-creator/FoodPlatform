@@ -31,7 +31,8 @@ func (p *Publisher) Start(ctx context.Context) {
 
 	slog.Info("Outbox Publisher starting for Order Service")
 
-	ticker := time.NewTicker(5 * time.Second)
+	// to check it's working
+	ticker := time.NewTicker(10 * time.Second)
 	for range ticker.C {
 		events, err := p.Queries.GetUnpublishedOutboxEvents(ctx)
 		if err != nil {
