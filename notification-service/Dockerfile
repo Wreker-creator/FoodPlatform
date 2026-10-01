@@ -11,7 +11,7 @@ RUN go mod download
 
 COPY . .
 
-# this will create a binary of the name notification-service with zero C dependencies
+# this will create a binary of the name noifications-service with zero C dependencies
 RUN CGO_ENABLED=0 GOOS=linux go build -o notification-service ./cmd/server
 
 # now we create a small container that can run the binary we are creating right above
@@ -23,6 +23,6 @@ WORKDIR /app
 # copy the details from our builder
 COPY --from=builder /app/notification-service .
 
-EXPOSE 8080
+EXPOSE 8081
 
 ENTRYPOINT ["./notification-service"]
