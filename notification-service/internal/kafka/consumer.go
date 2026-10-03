@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"notification-service/internal/store"
 
@@ -27,21 +28,24 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries) *Con
 }
 
 func (c *Consumer) Start(ctx context.Context) {
-
-	slog.Info("Consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+	slog.Info("consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
 	for {
 		msg, err := c.reader.ReadMessage(ctx)
 		if err != nil {
-			slog.Error("Failed to read messages", "error:", err)
+			// Check if this was a graceful shutdown trigger
+			if errors.Is(err, context.Canceled) {
+				slog.Info("consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
+				return
+			}
+
+			slog.Error("failed to read message", "error", err)
 			continue
 		}
 
 		if err := c.Read(ctx, msg); err != nil {
-			slog.Error("Failed to process message", "error:", err, "offset", msg.Offset)
-			// delibrately not failing this - one bad message should not kill the whole consumer
+			slog.Error("failed to process message", "error", err, "offset", msg.Offset)
 		}
 	}
-
 }
 
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {

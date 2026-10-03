@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"payment-service/internal/store"
 
@@ -28,24 +29,32 @@ func NewPublisher(queries *store.Queries, topic, brokerAddr string) *Publisher {
 }
 
 func (p *Publisher) Start(ctx context.Context) {
-
-	slog.Info("Outbox Publisher starting for Payment Service")
-
+	slog.Info("Outbox Publisher starting")
 	ticker := time.NewTicker(5 * time.Second)
-	for range ticker.C {
-		events, err := p.Queries.GetUnpublishedOutboxEvents(ctx)
-		if err != nil {
-			slog.Error("Failed to fetch unpublished outbox events", "Error: ", err)
-			continue
-		}
-		for _, e := range events {
-			if err := p.PublishRaw(ctx, e.AggregateKey, e.EventType, e.Payload); err != nil {
-				continue // retry next tick
-			}
-			err = p.Queries.MarkOutboxEventPublished(ctx, e.ID)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("publisher context canceled, stopping publication loop")
+			return
+		case <-ticker.C:
+			events, err := p.Queries.GetUnpublishedOutboxEvents(ctx)
 			if err != nil {
-				slog.Error("Failed to mark event as published", "Error: ", err, "id: ", e.ID)
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				slog.Error("Failed to fetch unpublished outbox events", "Error: ", err)
 				continue
+			}
+			for _, e := range events {
+				if err := p.PublishRaw(ctx, e.AggregateKey, e.EventType, e.Payload); err != nil {
+					continue
+				}
+				if err := p.Queries.MarkOutboxEventPublished(ctx, e.ID); err != nil {
+					slog.Error("Failed to mark event as published", "Error: ", err, "id: ", e.ID)
+					continue
+				}
 			}
 		}
 	}

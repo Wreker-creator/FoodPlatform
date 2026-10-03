@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"inventory-service/internal/store"
 	"log/slog"
@@ -37,14 +38,18 @@ func (c *Consumer) Start(ctx context.Context) {
 	for {
 		msg, err := c.reader.ReadMessage(ctx)
 		if err != nil {
+			// Check if this was a graceful shutdown trigger
+			if errors.Is(err, context.Canceled) { // updating because we have added graceful shutdown now
+				slog.Info("consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
+				return
+			}
+
 			slog.Error("failed to read message", "error", err)
 			continue
 		}
 
 		if err := c.Read(ctx, msg); err != nil {
 			slog.Error("failed to process message", "error", err, "offset", msg.Offset)
-			// deliberately not stopping the loop here — one bad message
-			// shouldn't kill the whole consumer; log it and move to the next
 		}
 	}
 }

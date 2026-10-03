@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"log/slog"
+	"net/http"
 	"order-service/internal/handler"
 	"order-service/internal/kafka"
 	"order-service/internal/store"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +32,9 @@ func main() {
 	}
 
 	// need to give values param
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
@@ -53,6 +60,29 @@ func main() {
 	router.GET("/orders/:id", orderHandler.GetOrdersById)
 	router.GET("/orders", orderHandler.ListOrders)
 
-	router.Run(":8080")
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: router,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to listen : %v\n", err)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("shutdown signal received, draining...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("Server forced to shutdown", "Error:", err)
+	}
+
+	slog.Info("all background workers and HTTP server stopped cleanly")
+
+	// router.Run(":8080")
 
 }
