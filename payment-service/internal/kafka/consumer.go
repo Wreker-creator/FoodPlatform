@@ -135,7 +135,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				slog.Error("Failed to commit payment transaction", "error: ", err)
+				slog.Error("Failed to commit payment failed transaction", "error: ", err)
 				return err
 			}
 
@@ -167,12 +167,12 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			EventType:    "PaymentSucceeded",
 			Payload:      payloadBytes,
 		}); err != nil {
-			slog.Error("Failed to insert payment Failed outbox event", "error: ", err)
+			slog.Error("Failed to insert payment succeeded outbox event", "error: ", err)
 			return err
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commut payment transaction", "error: ", err)
+			slog.Error("Failed to commut payment succeeded transaction", "error: ", err)
 			return err
 		}
 

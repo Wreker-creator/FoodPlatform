@@ -1,3 +1,6 @@
+# ============================================
+# 1. FULL CLEAN REBUILD & BOOTSTRAP
+# ============================================
 docker compose down -v
 docker compose build --no-cache
 docker compose up -d
@@ -6,7 +9,7 @@ docker compose ps
 docker compose logs kafka-init
 
 # ============================================
-# 1. CONFIRM CONSUMERS & PUBLISHERS
+# 2. CONFIRM CONSUMERS & PUBLISHERS ACTIVE
 # ============================================
 docker compose logs order-service | grep -iE "consumer starting|publisher starting"
 docker compose logs inventory-service | grep -iE "consumer starting|publisher starting"
@@ -14,59 +17,107 @@ docker compose logs payment-service | grep -iE "consumer starting|publisher star
 docker compose logs notification-service | grep -iE "consumer starting"
 
 # ============================================
-# 2. SEED INVENTORY
+# 3. SEED INITIAL INVENTORY
 # ============================================
 curl -X POST localhost:8081/inventory -H "Content-Type: application/json" -d '{"product_id":1,"quantity":100}'
 docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+# Expect: product_id: 1, available_quantity: 100
 
 # ============================================
-# 3. SUCCESS PATH (Order 1: total = 19.98)
+# 4. PATH 1: SUCCESS PATH (Order 1: amount < 1000)
 # ============================================
 curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
 
-# Allow outbox publishers (5-10s interval) and consumers to complete the saga
-sleep 8
+sleep 10
 
-# Verify Outbox states across all 3 publishing services (all should be published = true)
-docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, event_type, published FROM outbox;"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT id, event_type, published FROM outbox;"
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, event_type, published FROM outbox;"
+# Verify Outbox published states across all participating services
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
 
-# Verify final entity states
-docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 1;"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 1;"
-docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT * FROM notifications WHERE order_id = 1;"
+# Verify DB state transitions
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, customer_id, status, total_amount FROM orders WHERE id = 1;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, order_id, status, amount FROM payments WHERE order_id = 1;"
+docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 1;"
 curl -s http://localhost:8084/notifications/1
+# Expect: outboxes published:true, order CONFIRMED, stock 98, payment SUCCEEDED, notification stored
 
 # ============================================
-# 4. PAYMENT-FAILURE PATH (Order 2: total = 1200)
+# 5. PATH 2: PAYMENT FAILURE & SAGA COMPENSATION (Order 2: amount > 1000)
 # ============================================
 curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":600}]}'
 
-sleep 10
+sleep 12
 
-# Expected: order CANCELLED, stock restored to 98, payment FAILED, cancellation notification stored
 docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 2;"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 2;"
-docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT * FROM notifications WHERE order_id = 2;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, order_id, status, amount FROM payments WHERE order_id = 2;"
+docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 2;"
+curl -s http://localhost:8084/notifications/2
+# Expect: order CANCELLED, stock restored back to 98 (compensation), payment FAILED, cancellation notification stored
 
 # ============================================
-# 5. INVENTORY-REJECTION PATH (Order 3: quantity = 9999)
+# 6. PATH 3: INVENTORY REJECTION / SHORT-CIRCUIT (Order 3: quantity = 9999)
 # ============================================
 curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":9999,"unit_price":9.99}]}'
 
 sleep 10
 
-# Expected: order CANCELLED, stock unchanged at 98, no payment row for order 3
 docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 3;"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
 docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 3;"
-docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT * FROM notifications WHERE order_id = 3;"
+docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 3;"
+curl -s http://localhost:8084/notifications/3
+# Expect: order CANCELLED, stock untouched at 98, zero rows in payments for order 3
 
 # ============================================
-# 6. ERROR SWEEP
+# 7. PATH 4: CHAOS TEST — TRANSACTIONAL OUTBOX RESILIENCE
+# Target: kill inventory-service immediately after placing order
+# Goal: observe unpublished outbox row while service is down, observe publisher recovery upon restart
+# ============================================
+
+# Step A: Place Order 4 and immediately stop inventory-service
+curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}' && docker compose stop inventory-service
+
+# Step B: Allow order-service to complete its outbox publication
+sleep 3
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '4';"
+
+# Step C: Inspect inventory-db outbox table while service is down
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT id, aggregate_key, event_type, published, created_at FROM outbox WHERE aggregate_key = '4';"
+
+# Verify payment-service has NOT received anything yet for order 4
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM payments WHERE order_id = 4;"
+
+# Step D: Restart inventory-service
+docker compose start inventory-service
+echo "inventory-service restarted, awaiting publisher tick..."
+
+# Step E: Allow the outbox publisher loop to catch up and publish to Kafka
+sleep 10
+
+# Step F: Confirm outbox row shifted to published: true
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '4';"
+
+# Step G: Confirm end-to-end saga resumed and completed across all services
+docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, status FROM orders WHERE id = 4;"
+docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
+docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, order_id, status, amount FROM payments WHERE order_id = 4;"
+docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 4;"
+curl -s http://localhost:8084/notifications/4
+# Expect: outbox published:true, order 4 CONFIRMED, stock 96, payment SUCCEEDED, notification generated
+
+# ============================================
+# 8. KAFKA BROKER & TOPIC OFFSETS CHECK
+# ============================================
+docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-events
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic inventory-events
+docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment-events
+
+# ============================================
+# 9. LOGS & ERROR SWEEP
 # ============================================
 docker compose logs order-service | grep -iE "error|fatal"
 docker compose logs inventory-service | grep -iE "error|fatal"

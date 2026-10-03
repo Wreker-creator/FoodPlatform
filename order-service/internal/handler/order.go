@@ -157,7 +157,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// }
 
 	if err := tx.Commit(ctx); err != nil {
-		slog.Error("failed to commit order transaction", "error", err)
+		slog.Error("failed to commit order created transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to create order"})
 		return
 	}

@@ -81,6 +81,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit awaiting payment transaction", "Error:", err)
+			return err
+		}
+
 		return nil
 
 	case "InventoryRejected":
@@ -120,11 +125,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			slog.Error("Failed to commit Order cancelled transaction", "error: ", err)
 			return err
 		}
 
-		return err
+		return nil
 
 	case "PaymentSucceeded":
 		var event PaymentSucceededEvent
@@ -169,11 +174,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			slog.Error("Failed to commit order confirmed transaction ", "error: ", err)
 			return err
 		}
 
-		return err
+		return nil
 
 	case "PaymentFailed":
 
@@ -229,11 +234,11 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit transaction for order-service in consumer.go", "error: ", err)
+			slog.Error("Failed to commit order cancelled transaction", "error: ", err)
 			return err
 		}
 
-		return err
+		return nil
 
 	default:
 		slog.Warn("unknown event type", "event_type", envelope.EventType)

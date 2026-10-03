@@ -74,7 +74,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		// what do i do with this notification?
+		return nil // nothing to return, but we are expecting an error, so just return nil instead
 
 	case "OrderCancelled":
 
@@ -96,7 +96,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		// again what the fk do i do with this notification
+		return nil
 
 	}
 
