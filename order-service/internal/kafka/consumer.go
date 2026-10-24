@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"order-service/internal/store"
 	"strconv"
@@ -115,8 +116,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		payloadBytes, err := json.Marshal(cancelledEvent)
 		if err != nil {
-			slog.Error("Failed to marhsal the event", "error: ", err)
-			return err
+			return fmt.Errorf("Failed to marhsal the event %w", err)
 		}
 
 		_, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
@@ -126,11 +126,12 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		})
 
 		if err != nil {
-			slog.Error("failed to insert outbox event", "error", err)
+			// slog.Error("failed to insert outbox event", "error", err)
+			return fmt.Errorf("Failed to insert outbox event: %w", err)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit Order cancelled transaction", "error: ", err)
+			slog.Error("Failed to commit order cancelled transaction", "Error:", err)
 			return err
 		}
 
@@ -236,6 +237,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		if err != nil {
 			slog.Error("Failed to insert outbox event", "error: ", err)
+			return err
 		}
 
 		if err := tx.Commit(ctx); err != nil {

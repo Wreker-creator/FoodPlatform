@@ -160,7 +160,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit inventory reserved transaction", "error", err)
+			slog.Error("Failed to commit inventory reserved transaction", "Error:", err)
 			return err
 		}
 
@@ -189,7 +189,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			slog.Error("Failed to commit release inventory transaction", "error", err)
+			slog.Error("Failed to commit inventory release transaction", "Error:", err)
 			return err
 		}
 

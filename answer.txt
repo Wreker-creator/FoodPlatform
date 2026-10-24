@@ -1,0 +1,436 @@
+
+================================================================================
+FOOD PLATFORM - SYSTEM ARCHITECTURE & INTERVIEW NOTES
+================================================================================
+
+1. WALK ME THROUGH WHAT THIS SYSTEM DOES
+--------------------------------------------------------------------------------
+    It is an event-driven food ordering platform split into four services: 
+    Order, Inventory, Payment, and Notification.
+
+    When a user places an order:
+    1. Order Service saves it as PENDING and writes an event to an Outbox table.
+    2. An outbox loop publishes that event to Kafka.
+    3. Inventory Service reads the event and tries to decrement stock. If stock 
+    is available, it reserves it; if not, it rejects it immediately.
+    4. If reserved, Payment Service attempts to charge the customer.
+    5. If payment succeeds, Order Service marks the order as CONFIRMED.
+    6. If payment fails, Order Service marks it as CANCELLED and fires an event 
+    telling Inventory Service to add the stock back (compensation).
+    7. Finally, Notification Service logs alerts for confirmed or cancelled orders.
+
+    All state transitions happen asynchronously through Kafka without services 
+    talking to each other directly via HTTP.
+
+
+2. WHY FOUR SERVICES AND NOT JUST ONE?
+--------------------------------------------------------------------------------
+    1. Independent Scaling:
+    Inventory and Order services handle heavy traffic, while Payment handles 
+    fewer, slower calls to external gateways. We can scale the services that 
+    need more resources without duplicating the whole stack.
+
+    2. Crash Isolation (Blast Radius):
+    If the Notification database crashes or the Payment gateway times out, 
+    the Order service can still accept new orders, and the Inventory service 
+    can still track stock. One slow dependency does not freeze the entire app.
+
+    3. Separate Deployments:
+    Changing how payments or notifications work does not require rebuilding 
+    or redeploying the core order placement logic.
+
+
+3. EACH SERVICE HAS ITS OWN DATABASE. WHAT DID YOU GIVE UP BY DOING THAT?
+--------------------------------------------------------------------------------
+    1. We gave up standard ACID transactions: (Atomicity, consistency, Isolation, Durability)
+    In a single database, reserving stock and creating an order happens in 
+    2-millisecond SQL transaction. If anything fails, Postgres rolls back 
+    everything automatically. 
+    With separate databases, we must manage distributed consistency ourselves 
+    using a Saga—which means writing compensating logic (like manually 
+    refunding stock when a payment fails).
+
+    2. We gave up SQL JOINs:
+    You cannot run a simple JOIN between orders and payments. Getting full order 
+    details requires making multiple service calls or aggregating data via Kafka 
+    into a separate read database.
+
+    3. We introduced the "Dual-Write" problem:
+    Updating a database and publishing an event to Kafka are two separate network 
+    operations. If the database commit succeeds but Kafka is down, the system 
+    gets out of sync. To fix this, we had to build the Transactional Outbox pattern.
+
+
+4. WHAT IS THE TRANSACTIONAL OUTBOX PATTERN AND WHY USE IT?
+--------------------------------------------------------------------------------
+    The Problem:
+    If you do this in your API handler:
+        db.CreateOrder()
+        kafka.Publish("OrderCreated")
+    If Kafka fails, network drops, or the service crashes between those two lines, 
+    your database has the order, but Kafka never gets the message. Other services 
+    never react, and the order is stuck forever.
+
+    The Fix (Outbox Pattern):
+    Instead of publishing directly to Kafka, we write the event into an `outbox` 
+    table inside the same Postgres transaction that creates the order. Because it 
+    runs in a single `BEGIN ... COMMIT`, both either succeed or fail together.
+
+    A background worker polls the `outbox` table, sends the events to Kafka, 
+    and marks them as published only after Kafka acknowledges receipt.
+
+
+5. HOW DOES GRACEFUL SHUTDOWN WORK HERE?
+--------------------------------------------------------------------------------
+    When a container is stopped (Ctrl+C, Docker stop, or Kubernetes pod eviction):
+    1. The OS sends a SIGTERM signal.
+    2. `signal.NotifyContext` catches it and cancels the Go context.
+    3. The HTTP server (`srv.Shutdown()`) stops taking new requests and waits for 
+    active requests to finish up to a 5-second deadline.
+    4. Kafka consumer and publisher loops see `ctx.Done()`, stop reading new 
+    messages, finish their active iteration, and exit their loops cleanly.
+    5. Finally, the Postgres connection pool is closed (`pool.Close()`).
+
+    This prevents dropped in-flight HTTP requests, half-written database rows, 
+    and Kafka offset desynchronization when containers restart.
+
+
+6. EXPLAIN TOPIC, PARTITION, AND CONSUMER GROUPS
+--------------------------------------------------------------------------------
+    1. Topic:
+    A named category or append-only stream where publishers write events and 
+    consumers read them. Messages written to a topic are immutable.
+
+    2. Partition:
+    A topic is split into partitions for parallelism. Each partition is an 
+    independent, append-only log on disk.
+    - Ordering rule: Kafka only guarantees strict chronological message order 
+        within a single partition, never across partitions.
+    - Routing: Kafka hashes the message key (`order_id`) to determine which 
+        partition an event goes to (`hash(key) % total_partitions`). Same key 
+        always routes to the same partition.
+
+    3. Consumer Group:
+    A pool of consumer instances that share the work of consuming a topic. 
+    Kafka assigns each partition in a topic to exactly one consumer within 
+    a group at any given time.
+
+
+7. INVENTORY AND NOTIFICATION BOTH READ ORDER-EVENTS. WHAT HAPPENS IF THEY SHARE A GROUP ID?
+--------------------------------------------------------------------------------
+    The system breaks completely.
+
+    If two different services share the same `group.id`:
+    1. Kafka treats them as competing workers in the same pool and load-balances 
+    messages across them.
+    2. For a 1-partition topic, only one service gets the partition; the other sits 
+    idle receiving nothing.
+    3. For multi-partition topics, half the orders go to Inventory and half go to 
+    Notification. Inventory misses half the orders (so stock is never reserved), 
+    and Notification receives events it cannot process.
+
+    The rule: Separate services must have distinct `group.id` strings so each service 
+    gets its own independent copy of every event stream and tracks its own offset.
+
+
+8. WHY IS ORDER_ID YOUR MESSAGE KEY?
+--------------------------------------------------------------------------------
+    1. Per-Order Ordering Guarantee:
+    Kafka routes messages by hashing their key. Using `order_id` as the key 
+    guarantees that every event for a specific order (`OrderCreated`, 
+    `OrderConfirmed`, `OrderCancelled`) always lands on the exact same partition. 
+    Therefore, consumers process that order's lifecycle in strict sequence.
+
+    2. Concurrency Across Different Orders:
+    While events for Order #1 are serialized on one partition, events for 
+    Order #2 can land on another partition and execute concurrently without 
+    blocking each other.
+
+
+9. YOUR TOPICS HAVE ONE PARTITION. WHAT DOES THAT LIMIT? WHAT HAPPENS IF YOU RUN 3 REPLICAS OF A CONSUMER?
+--------------------------------------------------------------------------------
+    What it limits:
+    A single partition restricts consumer parallelism to exactly 1 active consumer 
+    instance per consumer group. It also caps write throughput to the disk speed 
+    of the single broker hosting that partition.
+
+    What happens with 3 replicas:
+    Kafka assigns at most one consumer instance per partition within a single group.
+    With 1 partition:
+    - 1 replica is assigned the partition and does 100% of the reading.
+    - The other 2 replicas sit completely idle on standby (wasting CPU/RAM).
+
+    To actually scale out to 3 active consumers processing in parallel, the topic 
+    must have at least 3 partitions.
+
+
+10. WHY SQLC OVER GORM? WHY DOES DECREMENTINVENTORY RETURN A ROW COUNT?
+--------------------------------------------------------------------------------
+    1. Why sqlc over GORM:
+    - Performance: No reflection overhead, dynamic SQL parsing, or hidden queries.
+    - Full SQL Control: You write raw, optimized SQL queries; sqlc generates 
+        type-safe Go code and structs at compile time.
+    - Compile-Time Safety: If a column name or type changes, `sqlc generate` or 
+        the Go compiler fails immediately instead of causing runtime bugs.
+
+    2. Why DecrementInventory returns rowsAffected:
+    In SQL, if no rows match a WHERE clause, the UPDATE does not return an error—
+    it simply updates 0 rows and returns success (err == nil).
+
+    Because of our WHERE clause (`WHERE product_id = $1 AND available_quantity >= $2`):
+    - If stock is available: It updates the row and returns rowsAffected = 1.
+    - If stock is insufficient: Nothing updates, but err is still nil! 
+
+    We must return rowsAffected so Go code can branch:
+    - If `rowsAffected == 0`, we know stock was insufficient and trigger the 
+        InventoryRejected event.
+    - Without checking the row count, the service would falsely assume the 
+        decrement succeeded.
+
+11. What’s the dual-write problem? Show me the exact crash window.”
+--------------------------------------------------------------------------------
+    We have 2 network publish calls, one committing to the database, one to kafka, if kafka fails
+    we still have an order published to the database, which neither of the services like inventory etc, cannot read it
+    
+    If you do this in your API handler:
+    db.CreateOrder()        // 1. Success in DB
+    // <--- CRASH WINDOW ---> (Process dies right here)
+    kafka.Publish(...)      // 2. Never executed
+    To avoid this we added outbox pattern.
+
+
+12. HOW DOES THE OUTBOX FIX IT? WHAT'S INSIDE THE TRANSACTION?
+--------------------------------------------------------------------------------
+    How it fixes the dual-write problem:
+    Instead of trying to coordinate two separate systems (Postgres and Kafka), 
+    we collapse both actions into a single local PostgreSQL ACID transaction. 
+
+    Postgres cannot guarantee delivery to Kafka, but it 100% guarantees Atomicity 
+    for its own local tables.
+
+    What is inside the transaction:
+    Every state-changing operation executes both an operational write and an 
+    outbox insertion inside the same `BEGIN ... COMMIT` block.
+
+    Example (in Order Service during POST /orders):
+        BEGIN;
+        -- 1. Mutate operational business state
+        INSERT INTO orders (customer_id, status, total_amount) 
+        VALUES (1, 'PENDING', 99.99);
+
+        INSERT INTO order_items (order_id, product_id, quantity, unit_price) 
+        VALUES (1, 10, 2, 49.99);
+
+        -- 2. Stage the event for external broadcast
+        INSERT INTO outbox (aggregate_key, event_type, payload, published) 
+        VALUES ('1', 'OrderCreated', '{"order_id":1,...}', FALSE);
+        COMMIT;
+
+    Why this eliminates the crash window:
+    - If Postgres crashes before COMMIT: Nothing is saved. No phantom order exists, 
+    and no event row exists.
+    - If Postgres crashes after COMMIT: Both the order and the outbox event exist 
+    on disk in the Write-Ahead Log (WAL).
+    - A separate background publisher loop periodically polls `WHERE published = FALSE`, 
+    pushes the payload to Kafka, and updates `published = TRUE`. If the publisher 
+    dies, it simply restarts and retries.
+
+13. WHAT DOES THE OUTBOX COST YOU?
+--------------------------------------------------------------------------------
+    1. Delivery Latency:
+    Events are not dispatched instantaneously. In our setup, a background ticker 
+    polls the database every 5 seconds, introducing an artificial 0 to 5 second 
+    delay before downstream services even know an event occurred.
+
+    2. Database Polling Load & Contention:
+    Running periodic `SELECT ... WHERE published = FALSE` queries adds constant 
+    read I/O against the database. Under high throughput, frequent table scans 
+    and updates create row contention and bloat table indexes.
+
+    3. Table Bloat & Storage Growth:
+    Every single order and status change writes a new JSON payload into the 
+    `outbox` table. Over time, this table grows indefinitely unless an explicit 
+    retention strategy (like a cleanup worker running `DELETE ... WHERE published = TRUE` 
+    or table partitioning) is maintained.
+
+    4. At-Least-Once Delivery Guarantees (Requires Idempotency Downstream):
+    If the publisher sends a message to Kafka but crashes before running 
+    `MarkOutboxEventPublished` in PostgreSQL, the event remains `published = FALSE`. 
+    Upon restart, the publisher pushes the exact same message to Kafka a second 
+    time. This pushes the burden of handling duplicate messages onto the consumers.
+
+14. WHY CHOREOGRAPHY OVER AN ORCHESTRATOR? WHAT'S THE DOWNSIDE?
+--------------------------------------------------------------------------------
+    Why Choreography (What we chose):
+    - No Single Point of Failure: There is no central coordinator or "brain" service 
+    that can crash and halt the entire system.
+    - Loose Coupling: Services only react to events on Kafka topics. They do not know 
+    who downstream is listening or what steps happen after them[cite: 1].
+    - Simpler Infrastructure: You don't need to deploy, maintain, or scale an 
+    orchestrator engine (like Temporal, Zeebe, or AWS Step Functions).
+
+    The Downsides:
+    - Scattered Business Logic: The end-to-end workflow is not visible in one place. 
+    To understand how an order finishes or fails, you have to trace code across 
+    all four separate repositories[cite: 1].
+    - Risk of Cyclic Loops & Hard Debugging: If service A emits an event that causes 
+    service B to emit an event that triggers service A again, you can cause an 
+    infinite event loop. Pinpointing where a message dropped or stalled requires 
+    distributed tracing across Kafka.
+    - Complex Error Handling: As the number of steps grows (e.g., adding delivery, 
+    discounts, refunds), writing compensating events between decoupled services 
+    becomes much harder to manage than a central state machine.
+
+
+15. PAYMENT FAILS AFTER INVENTORY WAS RESERVED. WALK ME THROUGH COMPENSATION.
+--------------------------------------------------------------------------------
+    This is the automated rollback path when a user cannot be charged (e.g., amount > 1000):
+
+    Step 1: Inventory is Already Held
+    - Inventory Service already decremented stock and committed it to Postgres.
+    - It wrote an `InventoryReserved` event to its outbox, which reached Kafka.
+
+    Step 2: Payment Rejection
+    - Payment Service consumes `InventoryReserved`.
+    - Payment validation fails.
+    - Payment Service writes a `PaymentFailed` row in Postgres and puts a `PaymentFailed` 
+    event into its outbox. Its publisher pushes it to `payment-events`.
+
+    Step 3: Order Service Coordinates Compensation
+    - Order Service consumes `PaymentFailed`.
+    - In a single local transaction, it:
+    1. Updates the order status from `AWAITING_PAYMENT` to `CANCELLED`.
+    2. Reads the original order items from `order_items`.
+    3. Writes an `OrderCancelled` event to its outbox with `ReleaseInventory: true` 
+        and the list of items.
+    - Order publisher pushes `OrderCancelled` to `order-events`.
+
+    Step 4: Inventory Compensation (Rollback)
+    - Inventory Service consumes `OrderCancelled` from `order-events`.
+    - It checks `if event.ReleaseInventory`.
+    - For each item, it executes `IncrementInventory`, adding the reserved quantities 
+    back to `available_quantity`.
+    - The stock is now fully restored to its pre-order balance.
+
+    Step 5: User Alert
+    - Notification Service consumes `OrderCancelled` and inserts a notification row: 
+    "Your order got cancelled due to [reason]".
+
+    #   No error exists to catch when the process dies between the DB commit and the publish. 
+        Outbox turns “must succeed now” into “durably recorded, retried forever”. The downsides 
+        of choreography are that the overall flow lives nowhere in one place and there’s no 
+        natural place for timeouts. Compensation runs through OrderCancelled with 
+        ReleaseInventory: true and Items.
+
+16. WHAT DELIVERY GUARANTEE DOES THE WHOLE SYSTEM GIVE?
+--------------------------------------------------------------------------------
+    What the interviewer is asking:
+    They want to know which standard distributed systems guarantee the pipeline 
+    achieves end-to-end:
+    - At-most-once (messages can be lost, but never duplicated)
+    - At-least-once (messages are never lost, but duplicates can occur)
+    - Exactly-once (messages are delivered and processed exactly one time)
+
+    The Answer:
+    The system provides an "At-Least-Once" delivery guarantee end-to-end.
+
+    Why:
+    - The Outbox pattern ensures that every committed database change is eventually 
+    sent to Kafka (zero message loss).
+    - However, if an outbox worker crashes after publishing to Kafka but before 
+    marking the row as published in PostgreSQL, or if Kafka retries a write, 
+    messages can be duplicated.
+    - Because we do not yet have consumer deduplication tables, processing is not 
+    strictly "exactly-once".
+
+
+17. WHERE CAN DUPLICATES COME FROM?
+--------------------------------------------------------------------------------
+    Duplicates enter the system from two specific network boundaries:
+
+    1. Publisher-side crashes (The Outbox Crash Window):
+    The outbox loop publishes the message to Kafka successfully, but the pod 
+    crashes or the DB connection drops before running:
+        `UPDATE outbox SET published = true WHERE id = $1`
+    When the service restarts, it reads that same outbox row again and re-publishes 
+    the exact same event to Kafka.
+
+    2. Kafka consumer rebalances / crashes:
+    If a consumer reads an event from Kafka, executes half of its business logic, 
+    and crashes before committing its Kafka offset, Kafka will reassign that 
+    partition to another instance and re-deliver the exact same message.
+
+
+18. WHICH OF YOUR CONSUMERS BREAK ON A DUPLICATE?
+--------------------------------------------------------------------------------
+    All consumers that mutate state break, and Inventory is actually the most dangerous:
+
+    1. Inventory Service (CRITICAL BREAK):
+    If `OrderCreated` is delivered twice, `DecrementInventory` executes twice. 
+    The database decrements stock twice for a single order.
+
+    2. Payment Service (CRITICAL BREAK):
+    If `InventoryReserved` is delivered twice, it executes `CreatePayment` twice. 
+    The customer gets double-charged, and duplicate payment rows are stored.
+
+    3. Order Service (STATE MACHINE CORRUPTION):
+    If `PaymentFailed` is delivered twice, the first one marks the order `CANCELLED` 
+    and fires `OrderCancelled` with `ReleaseInventory: true`. 
+    A duplicate delivery could trigger a second `OrderCancelled` event, causing 
+    Inventory to restock items twice (phantom inventory creation).
+
+    4. Notification Service (ANNOYANCE / BAD UX):
+    The user gets duplicate notification rows or duplicate emails for the same order.
+
+
+19. HOW WOULD YOU MAKE THEM IDEMPOTENT? WHAT WOULD YOU DEDUPE ON?
+--------------------------------------------------------------------------------
+    How to make them idempotent:
+    Add a `processed_events` table to each service's private database:
+        CREATE TABLE processed_events (
+            event_id VARCHAR(255) PRIMARY KEY,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+    When consuming a message, run the dedupe check inside the exact same local 
+    database transaction as the business write:
+        BEGIN;
+        INSERT INTO processed_events (event_id) VALUES ($1);
+        -- If $1 already exists, primary key constraint fails (or DO NOTHING)
+        -- Then run: UPDATE inventory ... / INSERT INTO payments ...
+        COMMIT;
+
+    What to dedupe on:
+    A unique `event_id` (UUID) attached to every event payload envelope at the moment 
+    the event is staged in the outbox. 
+    If re-delivery occurs, the consumer sees that `event_id` already exists in its 
+    `processed_events` table and discards the duplicate immediately.
+
+
+20. WHEN DOES YOUR CONSUMER COMMIT ITS OFFSET? WHAT HAPPENS TO A MESSAGE WHOSE READ RETURNS AN ERROR?
+--------------------------------------------------------------------------------
+    When it commits:
+    In our code (`consumer.go`), we use `segmentio/kafka-go`'s high-level reader:
+        msg, err := c.reader.ReadMessage(ctx)
+    By default, `ReadMessage()` manages commits in the background on an internal ticker 
+    (auto-commit). The offset is marked for commit almost immediately after the 
+    message is pulled off the socket.
+
+    What happens if Read(ctx, msg) returns an error:
+    In `consumer.go`:
+        if err := c.Read(ctx, msg); err != nil {
+            slog.Error("failed to process message", "error", err)
+        }
+    The error is merely logged, and the loop continues to the next iteration. 
+    Because the offset was already committed by `ReadMessage`:
+    - The failed message is skipped and lost forever.
+    - Kafka will NOT redeliver it upon restart.
+    - The order flow stalls at that step.
+
+    The Production Fix:
+    Switch from `ReadMessage()` to `FetchMessage()` and manual `CommitMessages()`:
+    1. `msg, err := c.reader.FetchMessage(ctx)` (fetches without committing)
+    2. Run database transaction `c.Read(ctx, msg)`
+    3. Only if `err == nil`, execute `c.reader.CommitMessages(ctx, msg)`
+    4. If an unrecoverable error occurs, route the payload to a Dead Letter Queue (DLQ) 
+    topic before committing the offset.
