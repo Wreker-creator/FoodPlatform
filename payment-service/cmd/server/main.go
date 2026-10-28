@@ -42,7 +42,7 @@ func main() {
 
 	// 2. Start Kafka background workers with cancellable ctx
 	consumer := kafka.NewConsumer("kafka:9094", "inventory-events", "payment-inventory-group", queries, pool)
-	publisher := kafka.NewPublisher(queries, "payment-events", "kafka:9094")
+	publisher := kafka.NewPublisher(queries, "payment-events", "kafka:9094", pool)
 
 	go consumer.Start(ctx)
 	go publisher.Start(ctx)

@@ -12,8 +12,10 @@ type Querier interface {
 	CreatePayment(ctx context.Context, arg CreatePaymentParams) (Payment, error)
 	GetPaymentByID(ctx context.Context, id int32) (Payment, error)
 	GetPaymentsByOrderID(ctx context.Context, orderID int32) ([]Payment, error)
+	GetUnpublishedEvents(ctx context.Context) ([]Outbox, error)
 	GetUnpublishedOutboxEvents(ctx context.Context) ([]Outbox, error)
 	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) (Outbox, error)
+	InsertProcessedEvent(ctx context.Context, eventID string) (int64, error)
 	MarkOutboxEventPublished(ctx context.Context, id int32) error
 	UpdatePaymentStatus(ctx context.Context, arg UpdatePaymentStatusParams) (Payment, error)
 }

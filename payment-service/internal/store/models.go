@@ -26,3 +26,8 @@ type Payment struct {
 	CreatedAt   pgtype.Timestamp `json:"created_at"`
 	UpdatedAt   pgtype.Timestamp `json:"updated_at"`
 }
+
+type ProcessedEvent struct {
+	EventID   string             `json:"event_id"`
+	ProcessAt pgtype.Timestamptz `json:"process_at"`
+}

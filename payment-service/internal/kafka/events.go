@@ -5,6 +5,7 @@ import "encoding/json"
 type EventEnvelope struct {
 	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload"`
+	EventID   string          `json:"event_id"`
 }
 
 type InventoryReservedEvent struct {

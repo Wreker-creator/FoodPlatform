@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"payment-service/internal/store"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,25 +35,64 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool
 }
 
 func (c *Consumer) Start(ctx context.Context) {
-	slog.Info("consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+	slog.Info("payment consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+
 	for {
-		msg, err := c.reader.ReadMessage(ctx)
+		// 1. Fetch message
+		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			// Check if this was a graceful shutdown trigger
-			if errors.Is(err, context.Canceled) { //updating because we have added graceful shutdown now
-				slog.Info("consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
+			if errors.Is(err, context.Canceled) {
+				slog.Info("payment consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
 				return
 			}
-
-			slog.Error("failed to read message", "error", err)
+			slog.Error("failed to fetch message", "topic", c.reader.Config().Topic, "error", err)
 			continue
 		}
 
-		if err := c.Read(ctx, msg); err != nil {
-			slog.Error("failed to process message", "error", err, "offset", msg.Offset)
+		// 2. Retry loop
+		maxRetries := 3
+		var processErr error
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			processErr = c.Read(ctx, msg)
+			if processErr == nil {
+				break
+			}
+
+			slog.Warn("retrying payment message processing",
+				"attempt", attempt,
+				"max_retries", maxRetries,
+				"topic", msg.Topic,
+				"offset", msg.Offset,
+				"error", processErr,
+			)
+
+			select {
+			case <-time.After(time.Duration(attempt*200) * time.Millisecond):
+			case <-ctx.Done():
+				slog.Info("context canceled during retry backoff, exiting")
+				return
+			}
 		}
+
+		if processErr != nil {
+			slog.Error("CRITICAL: payment message processing failed after max retries; skipping and committing offset",
+				"topic", msg.Topic,
+				"offset", msg.Offset,
+				"key", string(msg.Key),
+				"error", processErr,
+			)
+		}
+
+		// 3. Commit offset
+		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
+			slog.Error("failed to commit payment offset", "topic", msg.Topic, "offset", msg.Offset, "error", err)
+		}
+		cancel()
 	}
 }
+
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 	var envelope EventEnvelope
@@ -69,8 +109,28 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return err
 	}
 
-	defer tx.Rollback(ctx)
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
 	qtx := c.Queries.WithTx(tx)
+
+	// this is where we do idempotency check
+	if envelope.EventID == "" {
+		slog.Warn("Event missing eventId, cannot guarantee idempotency", "offset", msg.Offset)
+	} else {
+		rowsAffected, err := qtx.InsertProcessedEvent(ctx, envelope.EventID)
+		if err != nil {
+			slog.Error("Failed top insert processed event", "Error:", err)
+			return err
+		}
+
+		if rowsAffected == 0 {
+			// because we have added on conflict do nothing with execrows, we get back rowsAffected and can just actively check
+			slog.Info("idempotency check: event already processed, skipping", "event_id", envelope.EventID)
+			return nil
+		}
+	}
 
 	switch envelope.EventType {
 
