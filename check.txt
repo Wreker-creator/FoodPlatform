@@ -112,6 +112,7 @@ sleep 15
 # resulting in massive duplicates. We want to see exactly 5 new messages.
 docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-events
 
+IF RUNNING THROUGH BASH REMOVE "t" FROM "docker exec -it"
 
 # ============================================
 # 7. LOGS & ERROR SWEEP
