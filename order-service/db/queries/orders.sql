@@ -33,6 +33,10 @@ UPDATE orders
 SET status = $2
 WHERE id = $1;
 
+-- name: UpdateOrderStatusGuarded :execrows
+UPDATE orders 
+SET status = $2 
+WHERE id = $1 AND status = $3;
 
 -- name: ListOrdersByCustomer :many
 SELECT *

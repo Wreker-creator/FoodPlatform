@@ -434,3 +434,4 @@ FOOD PLATFORM - SYSTEM ARCHITECTURE & INTERVIEW NOTES
     3. Only if `err == nil`, execute `c.reader.CommitMessages(ctx, msg)`
     4. If an unrecoverable error occurs, route the payload to a Dead Letter Queue (DLQ) 
     topic before committing the offset.
+\

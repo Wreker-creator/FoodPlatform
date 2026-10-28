@@ -9,6 +9,37 @@ import (
 	"context"
 )
 
+const getUnpublishedEvents = `-- name: GetUnpublishedEvents :many
+SELECT id, aggregate_key, event_type, payload, published, created_at FROM outbox WHERE published = FALSE ORDER BY created_at ASC LIMIT 50 FOR UPDATE SKIP LOCKED
+`
+
+func (q *Queries) GetUnpublishedEvents(ctx context.Context) ([]Outbox, error) {
+	rows, err := q.db.Query(ctx, getUnpublishedEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Outbox
+	for rows.Next() {
+		var i Outbox
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateKey,
+			&i.EventType,
+			&i.Payload,
+			&i.Published,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getUnpublishedOutboxEvents = `-- name: GetUnpublishedOutboxEvents :many
 SELECT id, aggregate_key, event_type, payload, published, created_at FROM outbox WHERE published = FALSE ORDER BY created_at ASC
 `

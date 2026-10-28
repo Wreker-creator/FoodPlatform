@@ -23,3 +23,8 @@ type Outbox struct {
 	Published    bool             `json:"published"`
 	CreatedAt    pgtype.Timestamp `json:"created_at"`
 }
+
+type ProcessedEvent struct {
+	EventID   string             `json:"event_id"`
+	ProcessAt pgtype.Timestamptz `json:"process_at"`
+}

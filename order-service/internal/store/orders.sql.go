@@ -182,3 +182,23 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 	_, err := q.db.Exec(ctx, updateOrderStatus, arg.ID, arg.Status)
 	return err
 }
+
+const updateOrderStatusGuarded = `-- name: UpdateOrderStatusGuarded :execrows
+UPDATE orders 
+SET status = $2 
+WHERE id = $1 AND status = $3
+`
+
+type UpdateOrderStatusGuardedParams struct {
+	ID       int32  `json:"id"`
+	Status   string `json:"status"`
+	Status_2 string `json:"status_2"`
+}
+
+func (q *Queries) UpdateOrderStatusGuarded(ctx context.Context, arg UpdateOrderStatusGuardedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateOrderStatusGuarded, arg.ID, arg.Status, arg.Status_2)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"order-service/internal/store"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
@@ -34,22 +34,67 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool
 
 func (c *Consumer) Start(ctx context.Context) {
 	slog.Info("consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+
 	for {
-		msg, err := c.reader.ReadMessage(ctx)
+		// 1. Fetch message WITHOUT committing offset
+		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			// Check if this was a graceful shutdown trigger
-			if errors.Is(err, context.Canceled) { //updating because we have added graceful shutdown now
+			if errors.Is(err, context.Canceled) {
 				slog.Info("consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
 				return
 			}
-
-			slog.Error("failed to read message", "error", err)
+			slog.Error("failed to fetch message", "error", err)
 			continue
 		}
 
-		if err := c.Read(ctx, msg); err != nil {
-			slog.Error("failed to process message", "error", err, "offset", msg.Offset)
+		// 2. Process message with retries
+		maxRetries := 3
+		var processErr error
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			processErr = c.Read(ctx, msg)
+			if processErr == nil {
+				break
+			}
+
+			slog.Warn("retrying message processing",
+				"attempt", attempt,
+				"max_retries", maxRetries,
+				"topic", msg.Topic,
+				"offset", msg.Offset,
+				"error", processErr,
+			)
+
+			// Simple backoff before next retry (skip sleep if context canceled)
+			select {
+			case <-time.After(time.Duration(attempt*200) * time.Millisecond):
+			case <-ctx.Done():
+				slog.Info("context canceled during retry backoff, exiting")
+				return
+			}
 		}
+
+		// 3. Handle persistent failure vs success
+		if processErr != nil {
+			// In production without a DLQ, you have two choices:
+			// Option A: Skip and commit so the consumer doesn't block forever (log CRITICAL).
+			// Option B: Halt the consumer loop to alert on-call (prevents skipping bad data).
+			// For now, log critical failure and commit or park. Here we log error and skip.
+			slog.Error("CRITICAL: message failed after max retries, skipping and committing offset",
+				"topic", msg.Topic,
+				"offset", msg.Offset,
+				"key", string(msg.Key),
+				"error", processErr,
+			)
+		}
+
+		// 4. Commit offset ONLY after successful processing (or skipping poison pill)
+		// Use context.Background() so an in-flight commit isn't aborted if ctx cancels
+		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
+			slog.Error("failed to commit message offset", "topic", msg.Topic, "offset", msg.Offset, "error", err)
+		}
+		cancel()
 	}
 }
 
@@ -59,6 +104,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	slog.Info("received event envelope", "offset", msg.Offset, "key", string(msg.Key))
 	err := json.Unmarshal(msg.Value, &envelope)
 	if err != nil {
+		slog.Error("Failed to unmarshal envelope", "Error:", err)
 		return err
 	}
 
@@ -68,8 +114,31 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return err
 	}
 
-	defer tx.Rollback(ctx)
+	// defer tx.Rollback(ctx)
+	defer func() {
+		// with the introduction of graceful shutdown we are now open to handling issues like ctrl + C
+		// now in such cases SIGTERM is sent through context, and tx.Rollback might receive an already closed context
+		// to handle that we introduce this function
+		_ = tx.Rollback(context.Background())
+	}()
 	qtx := c.Queries.WithTx(tx)
+
+	// this is where we do idempotency check
+	if envelope.EventID == "" {
+		slog.Warn("Event missing eventId, cannot guarantee idempotency", "offset", msg.Offset)
+	} else {
+		rowsAffected, err := qtx.InsertProcessedEvent(ctx, envelope.EventID)
+		if err != nil {
+			slog.Error("Failed top insert processed event", "Error:", err)
+			return err
+		}
+
+		if rowsAffected == 0 {
+			// because we have added on conflict do nothing with execrows, we get back rowsAffected and can just actively check
+			slog.Info("idempotency check: event already processed, skipping", "event_id", envelope.EventID)
+			return nil
+		}
+	}
 
 	switch envelope.EventType {
 
@@ -79,15 +148,25 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			slog.Error("failed to unmarshal InventoryReservedEvent", "error", err)
 			return err
 		}
-		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
-			ID:     event.OrderId,
-			Status: "AWAITING_PAYMENT",
-		}); err != nil {
-			slog.Error("failed to update order status", "error", err)
+
+		rowsAffect, err := qtx.UpdateOrderStatusGuarded(ctx, store.UpdateOrderStatusGuardedParams{
+			ID:       event.OrderId,
+			Status:   "AWAITING_PAYMENT",
+			Status_2: "PENDING",
+		})
+
+		if rowsAffect == 0 {
+			// this is a check to see if the order was already moved to CONFIRMED or CANCELLED
+			slog.Warn("ignored stale event: order not in expected state", "order_id", event.OrderId)
+			return nil
+		}
+
+		if err != nil {
+			slog.Error("failed to update order status", "order_id", event.OrderId, "error", err)
 			return err
 		}
 
-		if err := tx.Commit(ctx); err != nil {
+		if err = tx.Commit(ctx); err != nil {
 			slog.Error("Failed to commit awaiting payment transaction", "Error:", err)
 			return err
 		}
@@ -100,12 +179,21 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			slog.Error("failed to unmarshal InventoryRejectedEvent", "error", err)
 			return err
 		}
-		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
-			ID:     event.OrderId,
-			Status: "CANCELLED",
-		}); err != nil {
-			slog.Error("failed to update order status", "error", err)
+
+		rowsAffected, err := qtx.UpdateOrderStatusGuarded(ctx, store.UpdateOrderStatusGuardedParams{
+			ID:       event.OrderId,
+			Status:   "CANCELLED",
+			Status_2: "PENDING",
+		})
+
+		if err != nil {
+			slog.Error("failed to update order status", "order_id", event.OrderId, "error", err)
 			return err
+		}
+
+		if rowsAffected == 0 {
+			slog.Warn("Igorning stale event: order not in expected state", "order_id", event.OrderId)
+			return nil
 		}
 
 		cancelledEvent := OrderCancelledEvent{
@@ -116,7 +204,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		payloadBytes, err := json.Marshal(cancelledEvent)
 		if err != nil {
-			return fmt.Errorf("Failed to marhsal the event %w", err)
+			slog.Error("Failed to marshal the event", "Error:", err)
+			return err
 		}
 
 		_, err = qtx.InsertOutboxEvent(ctx, store.InsertOutboxEventParams{
@@ -126,8 +215,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		})
 
 		if err != nil {
-			// slog.Error("failed to insert outbox event", "error", err)
-			return fmt.Errorf("Failed to insert outbox event: %w", err)
+			slog.Error("failed to insert outbox event", "error", err)
+			return err
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -144,12 +233,20 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
-			ID:     event.OrderId,
-			Status: "CONFIRMED",
-		}); err != nil {
-			slog.Error("failed to update order status", "error", err)
+		rowsAffected, err := qtx.UpdateOrderStatusGuarded(ctx, store.UpdateOrderStatusGuardedParams{
+			ID:       event.OrderId,
+			Status:   "CONFIRMED",
+			Status_2: "AWAITING_PAYMENT",
+		})
+
+		if err != nil {
+			slog.Error("failed to update order status", "order_id", event.OrderId, "error", err)
 			return err
+		}
+
+		if rowsAffected == 0 {
+			slog.Warn("Ingoring stale element, expected status incorrect", "order_id", event.OrderId)
+			return nil
 		}
 
 		order, err := qtx.GetOrderByID(ctx, event.OrderId)
@@ -177,7 +274,10 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		if err != nil {
 			slog.Error("Failed to insert outbox event, orderConfirmedEvent")
+			return err
 		}
+
+		// return fmt.Errorf("False error, adding for a fake DB TIMEOUT")
 
 		if err := tx.Commit(ctx); err != nil {
 			slog.Error("Failed to commit order confirmed transaction ", "error: ", err)
@@ -194,11 +294,19 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		if err := qtx.UpdateOrderStatus(ctx, store.UpdateOrderStatusParams{
-			ID:     event.OrderId,
-			Status: "CANCELLED",
-		}); err != nil {
-			slog.Error("failed to update order status", "error", err)
+		rowsAffected, err := qtx.UpdateOrderStatusGuarded(ctx, store.UpdateOrderStatusGuardedParams{
+			ID:       event.OrderId,
+			Status:   "CANCELLED",
+			Status_2: "AWAITING_PAYMENT",
+		})
+
+		if rowsAffected == 0 {
+			slog.Warn("Ignoring stale element, expect state is incorrect for", "order_id", event.OrderId)
+			return nil // is required because we dont want to commit another event into outbox for no reason
+		}
+
+		if err != nil {
+			slog.Error("failed to update order status", "order_id", event.OrderId, "error", err)
 			return err
 		}
 

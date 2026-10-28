@@ -8,3 +8,6 @@ SELECT * FROM outbox WHERE published = FALSE ORDER BY created_at ASC;
 
 -- name: MarkOutboxEventPublished :exec
 UPDATE outbox SET published = TRUE WHERE id = $1;
+
+-- name: GetUnpublishedEvents :many
+SELECT * FROM outbox WHERE published = FALSE ORDER BY created_at ASC LIMIT 50 FOR UPDATE SKIP LOCKED;
