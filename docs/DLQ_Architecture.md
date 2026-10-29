@@ -1,4 +1,4 @@
-```
+
 # Dead Letter Queue (DLQ) Architecture
 
 ## What is a DLQ?
