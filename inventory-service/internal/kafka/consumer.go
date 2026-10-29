@@ -15,12 +15,13 @@ import (
 )
 
 type Consumer struct {
-	reader  *kafka.Reader
-	Queries *store.Queries
-	Pool    *pgxpool.Pool
+	reader    *kafka.Reader
+	Queries   *store.Queries
+	Pool      *pgxpool.Pool
+	DLQWriter *kafka.Writer
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool, dlqWriter *kafka.Writer) *Consumer {
 	return &Consumer{
 		Queries: queries,
 		Pool:    pool,
@@ -30,6 +31,7 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool
 			GroupID:     groupID,
 			StartOffset: kafka.FirstOffset,
 		}),
+		DLQWriter: dlqWriter,
 	}
 }
 
@@ -82,6 +84,7 @@ func (c *Consumer) Start(ctx context.Context) {
 				"key", string(msg.Key),
 				"error", processErr,
 			)
+			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retries: %v", maxRetries, processErr))
 		}
 
 		// 3. Commit offset only after DB transaction finishes (or skipping poison pill)
@@ -96,7 +99,8 @@ func (c *Consumer) Start(ctx context.Context) {
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	var envelope EventEnvelope
 	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
-		return err
+		c.routeToDlq(ctx, msg, fmt.Sprintf("Failed to unmarshal envelope: %v", err))
+		return nil
 	}
 
 	tx, err := c.Pool.Begin(ctx)
@@ -258,4 +262,29 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		slog.Warn("unhandled event type", "event_type", envelope.EventType)
 	}
 	return nil
+}
+
+func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason string) {
+
+	dlqPayload := DLQMessage{
+		OriginalTopic: msg.Topic,
+		OriginalKey:   string(msg.Key),
+		OriginalValue: string(msg.Value),
+		ErrorReason:   reason,
+		FailedAt:      time.Now(),
+	}
+
+	payloadBytes, _ := json.Marshal(dlqPayload)
+
+	err := c.DLQWriter.WriteMessages(ctx, kafka.Message{
+		Key:   msg.Key,
+		Value: payloadBytes,
+	})
+
+	if err != nil {
+		slog.Error("CRITICAL: Failed to write to DLQ", "Error:", err)
+	} else {
+		slog.Info("routed poison pill to DLQ", "key", string(msg.Key), "reason:", reason)
+	}
+
 }

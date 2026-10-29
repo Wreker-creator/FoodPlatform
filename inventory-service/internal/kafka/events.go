@@ -1,6 +1,17 @@
 package kafka
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
+
+type DLQMessage struct {
+	OriginalTopic string    `json:"original_topic"`
+	OriginalKey   string    `json:"original_key"`
+	OriginalValue string    `json:"original_value"` // Stringified raw bytes
+	ErrorReason   string    `json:"error_reason"`
+	FailedAt      time.Time `json:"failed_at"`
+}
 
 type EventEnvelope struct {
 	EventType string          `json:"event_type"`

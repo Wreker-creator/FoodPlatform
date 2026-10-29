@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"notification-service/internal/store"
 	"time"
@@ -12,11 +13,12 @@ import (
 )
 
 type Consumer struct {
-	reader  *kafka.Reader
-	queries *store.Queries
+	reader    *kafka.Reader
+	queries   *store.Queries
+	DLQWriter *kafka.Writer
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, dlqwriter *kafka.Writer) *Consumer {
 	return &Consumer{
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
@@ -24,7 +26,8 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries) *Con
 			GroupID:     groupID,
 			StartOffset: kafka.FirstOffset,
 		}),
-		queries: queries,
+		queries:   queries,
+		DLQWriter: dlqwriter,
 	}
 }
 
@@ -76,6 +79,7 @@ func (c *Consumer) Start(ctx context.Context) {
 				"key", string(msg.Key),
 				"error", processErr,
 			)
+			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retried: %v", maxRetries, processErr))
 		}
 
 		// 3. Commit offset
@@ -93,8 +97,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	slog.Info("Receive event message", "offset", msg.Offset, "key", string(msg.Key))
 
 	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
-		slog.Error("Failed to unmarshal event envelope", "Error:", err)
-		return err
+		c.routeToDlq(ctx, msg, fmt.Sprintf("Failed to unmarshal event envelope:%v", err))
+		return nil
 	}
 
 	switch envelope.EventType {
@@ -144,5 +148,30 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	}
 
 	return nil
+
+}
+
+func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason string) {
+
+	dlqPayload := DLQMessage{
+		OriginalTopic: msg.Topic,
+		OriginalKey:   string(msg.Key),
+		OriginalValue: string(msg.Value),
+		ErrorReason:   reason,
+		FailedAt:      time.Now(),
+	}
+
+	payloadBytes, _ := json.Marshal(dlqPayload)
+
+	err := c.DLQWriter.WriteMessages(ctx, kafka.Message{
+		Key:   msg.Key,
+		Value: payloadBytes,
+	})
+
+	if err != nil {
+		slog.Error("CRITICAL: Failed to write to DLQ", "Error:", err)
+	} else {
+		slog.Info("routed poison pill to DLQ", "key", string(msg.Key), "reason:", reason)
+	}
 
 }

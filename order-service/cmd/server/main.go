@@ -16,6 +16,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	kafkago "github.com/segmentio/kafka-go"
 )
 
 func main() {
@@ -48,8 +50,23 @@ func main() {
 
 	orderHandler := handler.NewOrderHandler(queries, pool)
 
-	inventoryEventsConsumer := kafka.NewConsumer("kafka:9094", "inventory-events", "order-inventory-group", queries, pool)
-	paymentEventsConsumer := kafka.NewConsumer("kafka:9094", "payment-events", "order-payment-group", queries, pool)
+	dlqWriter := &kafkago.Writer{
+		// kafka doesn't use http, kafka.TCP tells the net package to open a socket at this port
+		Addr: kafkago.TCP("kafka:9094"),
+		// this is the shared topic where all broken messages are going to be read from
+		Topic: "dead-letter-events",
+		// in case of multiple paritions, leastBytes ensures messages are distributed evenly based on payload size
+		Balancer: &kafkago.LeastBytes{},
+	}
+
+	defer func() {
+		if err := dlqWriter.Close(); err != nil {
+			slog.Error("Failed to close DLQ writer", "error", err)
+		}
+	}()
+
+	inventoryEventsConsumer := kafka.NewConsumer("kafka:9094", "inventory-events", "order-inventory-group", queries, pool, dlqWriter)
+	paymentEventsConsumer := kafka.NewConsumer("kafka:9094", "payment-events", "order-payment-group", queries, pool, dlqWriter)
 
 	go inventoryEventsConsumer.Start(ctx)
 	go paymentEventsConsumer.Start(ctx)
