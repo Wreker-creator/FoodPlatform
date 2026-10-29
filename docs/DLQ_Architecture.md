@@ -1,4 +1,3 @@
-Here is the documentation formatted for GitHub. You can save this as `docs/DLQ_ARCHITECTURE.md` or add it to your `README.md`.
 
 ```markdown
 # Dead Letter Queue (DLQ) Architecture
