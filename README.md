@@ -183,19 +183,6 @@ Planned additions and architectural enhancements currently on the roadmap:
 * Liveness and readiness probes connected to health check endpoints.
 * Ingress controller configuration for routing incoming traffic to services.
 
-
-* [ ] **Outbox Polling Concurrency Locks**:
-* Implement PostgreSQL row-level locking (`SELECT ... FOR UPDATE SKIP LOCKED`) in outbox queries to prevent duplicate event dispatches when running multiple service replicas.
-
-
-* [ ] **Consumer Idempotency Keys**:
-* Introduce dedicated `processed_events` deduplication tables to enforce idempotent consumer processing against at-least-once Kafka deliveries.
-
-
 * [ ] **Distributed Tracing & Observability**:
 * Add OpenTelemetry tracing headers across Kafka message envelopes and HTTP requests.
 * Integrate Prometheus metrics export and Grafana visualization.
-
-
-* [ ] **Dead Letter Queues (DLQ)**:
-* Add retry topics and dead letter queues for poison-pill messages that fail unmarshaling or business validation.
