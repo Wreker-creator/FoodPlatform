@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'order-service'
+    dns_sd_configs:
+      - names:
+          - 'order-service'
+        type: 'A'
+        port: 8080

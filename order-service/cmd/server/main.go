@@ -9,6 +9,7 @@ import (
 	"order-service/internal/handler"
 	"order-service/internal/kafka"
 	"order-service/internal/store"
+	"order-service/internal/telemetry"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	kafkago "github.com/segmentio/kafka-go"
 )
@@ -26,6 +28,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	router := gin.Default()
+	router.Use(telemetry.PromMiddleware())
 
 	connString := os.Getenv("DATABASE_URL")
 
@@ -76,6 +79,7 @@ func main() {
 	router.POST("/orders", orderHandler.CreateOrder)
 	router.GET("/orders/:id", orderHandler.GetOrdersById)
 	router.GET("/orders", orderHandler.ListOrders)
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	srv := &http.Server{
 		Addr:    ":8080",

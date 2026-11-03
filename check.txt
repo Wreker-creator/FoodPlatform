@@ -25,7 +25,7 @@ docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM in
 # ============================================
 # 4. PATH 1: SUCCESS PATH (Order 1: amount < 1000)
 # ============================================
-curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
+curl -X POST localhost:9082/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
 
 sleep 10
 
