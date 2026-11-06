@@ -20,31 +20,30 @@ docker compose logs notification-service | grep -iE "consumer starting"
 # 3. SEED INITIAL INVENTORY
 # ============================================
 curl -X POST localhost:8081/inventory -H "Content-Type: application/json" -d '{"product_id":1,"quantity":100}'
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
+docker exec -i inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM inventory;"
 
 # ============================================
 # 4. PATH 1: SUCCESS PATH (Order 1: amount < 1000)
 # ============================================
-curl -X POST localhost:9082/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
+curl -X POST localhost:9080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}'
 
 sleep 10
 
 # Verify Outbox AND the new Idempotency (processed_events) states
-docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
-docker exec -it order-db psql -U wreker -d order-db -c "SELECT * FROM processed_events;"
+docker exec -i order-db psql -U wreker -d order-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
+docker exec -i order-db psql -U wreker -d order-db -c "SELECT * FROM processed_events;"
 
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM processed_events;"
+docker exec -i inventory-db psql -U wreker -d inventory-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
+docker exec -i inventory-db psql -U wreker -d inventory-db -c "SELECT * FROM processed_events;"
 
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT * FROM processed_events;"
+docker exec -i payment-db psql -U wreker -d payment-db -c "SELECT id, aggregate_key, event_type, published FROM outbox WHERE aggregate_key = '1';"
+docker exec -i payment-db psql -U wreker -d payment-db -c "SELECT * FROM processed_events;"
 
 # Verify DB state transitions
-docker exec -it order-db psql -U wreker -d order-db -c "SELECT id, customer_id, status, total_amount FROM orders WHERE id = 1;"
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
-docker exec -it payment-db psql -U wreker -d payment-db -c "SELECT id, order_id, status, amount FROM payments WHERE order_id = 1;"
-docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 1;"
-
+docker exec -i order-db psql -U wreker -d order-db -c "SELECT id, customer_id, status, total_amount FROM orders WHERE id = 1;"
+docker exec -i inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
+docker exec -i payment-db psql -U wreker -d payment-db -c "SELECT id, order_id, status, amount FROM payments WHERE order_id = 1;"
+docker exec -i notification-db psql -U wreker -d notification-db -c "SELECT id, order_id, message FROM notifications WHERE order_id = 1;"
 
 # ============================================
 # [ ... SKIP PATHS 2, 3, AND 4 (Keep your existing ones here) ... ]
@@ -59,7 +58,10 @@ docker exec -it notification-db psql -U wreker -d notification-db -c "SELECT id,
 
 # Step A: Inject a duplicate "OrderCreated" event for Order 1 directly into the topic.
 # (Adjust the JSON payload structure to match your exact EventEnvelope if needed)
-docker exec -it kafka /opt/kafka/bin/kafka-console-producer.sh \--bootstrap-server localhost:9092 \--topic order-events \<<< '{"event_id":"order-1","event_type":"OrderCreated","payload":{"order_id":1,"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}}'
+docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic order-events \
+  <<< '{"event_id":"order-1","event_type":"OrderCreated","payload":{"order_id":1,"customer_id":1,"items":[{"product_id":1,"quantity":2,"unit_price":9.99}]}}'
 
 sleep 3
 
@@ -69,11 +71,11 @@ docker compose logs inventory-service | grep -i "idempotency"
 
 # Step C: Verify Inventory Math was NOT executed twice
 # Expect: stock is exactly the same as it was at the end of Path 1 (e.g., 98, not 96)
-docker exec -it inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
+docker exec -i inventory-db psql -U wreker -d inventory-db -c "SELECT product_id, available_quantity FROM inventory WHERE product_id = 1;"
 
 # Step D: Inject a stale out-of-order event for Order 1
 # Order 1 is already CONFIRMED. Let's send a delayed "InventoryReserved" event.
-docker exec -it kafka /opt/kafka/bin/kafka-console-producer.sh \
+docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server localhost:9092 \
   --topic inventory-events \
   <<< '{"event_id":"inventory-999","event_type":"InventoryReserved","payload":{"order_id":1}}'
@@ -100,7 +102,7 @@ docker compose ps
 
 # Step C: Fire off a burst of 5 orders simultaneously
 for i in {1..5}; do
-  curl -X POST localhost:8080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":1,"unit_price":5.00}]}' &
+  curl -X POST localhost:9080/orders -H "Content-Type: application/json" -d '{"customer_id":1,"items":[{"product_id":1,"quantity":1,"unit_price":5.00}]}' &
 done
 wait
 
@@ -110,13 +112,25 @@ sleep 15
 # Step E: Verify Kafka Topic Count
 # If `SKIP LOCKED` failed, 3 publishers would have grabbed the same outbox rows, 
 # resulting in massive duplicates. We want to see exactly 5 new messages.
-docker exec -it kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-events
-
-IF RUNNING THROUGH BASH REMOVE "t" FROM "docker exec -it"
-AND REMEMBER THE DOCKER COMPOSE IS FOR PORTS 9080-9082 for order service, so accordingly update the rest of the commands
+docker exec -i kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic order-events
 
 # ============================================
-# 7. LOGS & ERROR SWEEP
+# 7. OBSERVABILITY & METRICS VERIFICATION (NEW)
+# Target: Ensure Prometheus is successfully scraping all Gin routes
+# ============================================
+
+# Step A: Fire off a large burst of mixed-status traffic across all services to populate histograms
+for i in {1..50}; do
+  curl -s -X GET http://localhost:9080/orders > /dev/null
+  curl -s -X GET http://localhost:8081/inventory > /dev/null
+done
+
+echo "Traffic generated. Open http://localhost:9090 in your browser and run the following queries:"
+echo "1. rate(http_requests_total[5m]) - View requests per second per service."
+echo "2. histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job)) - View P95 Latency per service."
+
+# ============================================
+# 8. LOGS & ERROR SWEEP
 # ============================================
 docker compose logs order-service | grep -iE "error|fatal|critical"
 docker compose logs inventory-service | grep -iE "error|fatal|critical"

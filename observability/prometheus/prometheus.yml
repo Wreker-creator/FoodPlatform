@@ -2,9 +2,25 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
+  # Order Service (Dynamic discovery for replicas)
   - job_name: 'order-service'
     dns_sd_configs:
       - names:
           - 'order-service'
         type: 'A'
         port: 8080
+
+  # Inventory Service (Single instance)
+  - job_name: 'inventory-service'
+    static_configs:
+      - targets: ['inventory-service:8081']
+
+  # Payment Service (Single instance)
+  - job_name: 'payment-service'
+    static_configs:
+      - targets: ['payment-service:8082']
+
+  # Notification Service (Single instance)
+  - job_name: 'notification-service'
+    static_configs:
+      - targets: ['notification-service:8084']

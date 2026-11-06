@@ -11,11 +11,13 @@ import (
 	"payment-service/internal/handler"
 	"payment-service/internal/kafka"
 	"payment-service/internal/store"
+	"payment-service/internal/telemetry"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	kafkago "github.com/segmentio/kafka-go"
 )
@@ -66,8 +68,10 @@ func main() {
 
 	// 3. Register routes on router FIRST
 	router := gin.Default()
+	router.Use(telemetry.PromMiddleware())
 	router.GET("/payments/:id", paymentHandler.GetPaymentByID)
 	router.GET("/payments", paymentHandler.GetPaymentsByOrder)
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// 4. Wrap router in net/http Server and serve in goroutine
 	srv := &http.Server{

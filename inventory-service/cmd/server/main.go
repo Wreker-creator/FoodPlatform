@@ -6,6 +6,7 @@ import (
 	"inventory-service/internal/handler"
 	"inventory-service/internal/kafka"
 	"inventory-service/internal/store"
+	"inventory-service/internal/telemetry"
 	"log"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	kafkago "github.com/segmentio/kafka-go"
 )
 
@@ -25,6 +27,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	router := gin.Default()
+	router.Use(telemetry.PromMiddleware())
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
