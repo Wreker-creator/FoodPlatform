@@ -25,9 +25,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	router := gin.Default()
-	router.Use(telemetry.PromMiddleware())
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	// --- CHANGED: Swapped gin.Default() for gin.New() and gin.Recovery() ---
+	// WHY: gin.Default() automatically attaches a plain-text logger middleware that outputs
+	// unformatted logs between your clean JSON lines, breaking structured log parsing.
+	// gin.New() gives us a blank router without the noisy logger, while gin.Recovery()
+	// ensures that if a handler panics, it returns a 500 error instead of crashing the container.
 
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
@@ -39,10 +41,16 @@ func main() {
 
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
-
 	defer pool.Close()
+
+	// --- NEW: Start tracking DB pool stats ---
+	// WHY: Even though this service acts primarily as a consumer, it still executes
+	// DB transactions (Idempotency checks). If Kafka floods this service with messages,
+	// we need Prometheus to monitor if we are exhausting our max Postgres connections.
+	telemetry.TrackDBPoolStats(ctx, pool)
 
 	dlqWriter := &kafkago.Writer{
 		// kafka doesn't use http, kafka.TCP tells the net package to open a socket at this port
@@ -64,6 +72,12 @@ func main() {
 
 	consumer := kafka.NewConsumer("kafka:9094", "order-events", "notification-order-group", queries, dlqWriter)
 	go consumer.Start(ctx)
+
+	router := gin.New()
+	router.Use(gin.Recovery())
+
+	router.Use(telemetry.PromMiddleware())
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	router.GET("/notifications/:id", notificationsHandler.GetNotificationsById)
 
@@ -89,7 +103,4 @@ func main() {
 	}
 
 	slog.Info("All Background workers and HTTP server stooped cleanly")
-
-	// router.Run(":8084")
-
 }

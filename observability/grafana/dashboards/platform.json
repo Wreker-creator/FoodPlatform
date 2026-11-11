@@ -1,0 +1,131 @@
+{
+  "title": "Platform Health & Kafka Pipeline",
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "CRITICAL: Oldest Unpublished Outbox Event (Seconds)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "max(outbox_oldest_unpublished_age_seconds)",
+          "legendFormat": "Max Age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Outbox Publish Failures",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (topic) (outbox_publish_failures_total)",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "DLQ Quarantined Messages",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (topic) (kafka_dlq_messages_total)",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "DB Active vs Idle Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (job, state) (db_connections)",
+          "legendFormat": "{{job}} ({{state}})"
+        }
+      ]
+    },
+    {
+      "title": "Outbox Backlog (Pending Publishes)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum by (topic) (outbox_unpublished_events_total)",
+          "legendFormat": "{{topic}}"
+        }
+      ]
+    },
+    {
+      "title": "Consumer Group Lag",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum by (group) (kafka_consumer_lag)",
+          "legendFormat": "{{group}}"
+        }
+      ]
+    },
+    {
+      "title": "HTTP Requests Per Second (Rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (job, route, status) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{job}} {{route}} [{{status}}]"
+        }
+      ]
+    },
+    {
+      "title": "Kafka Events Processed by Outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (topic, status) (kafka_events_processed_total)",
+          "legendFormat": "{{topic}} ({{status}})"
+        }
+      ]
+    }
+  ]
+}

@@ -37,9 +37,12 @@ func main() {
 
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
+
+	telemetry.TrackDBPoolStats(ctx, pool)
 
 	dlqWriter := &kafkago.Writer{
 		// kafka doesn't use http, kafka.TCP tells the net package to open a socket at this port
@@ -67,7 +70,8 @@ func main() {
 	go publisher.Start(ctx)
 
 	// 3. Register routes on router FIRST
-	router := gin.Default()
+	router := gin.New()
+	router.Use(gin.Recovery())
 	router.Use(telemetry.PromMiddleware())
 	router.GET("/payments/:id", paymentHandler.GetPaymentByID)
 	router.GET("/payments", paymentHandler.GetPaymentsByOrder)

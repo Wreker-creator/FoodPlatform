@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"payment-service/internal/store"
+	"payment-service/internal/telemetry"
 
 	"time"
 
@@ -33,6 +34,39 @@ func NewPublisher(queries *store.Queries, topic, brokerAddr string, pool *pgxpoo
 
 func (p *Publisher) Start(ctx context.Context) {
 	slog.Info("Outbox Publisher starting")
+
+	// Background ticker for Prometheus metrics
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Query 1: Count unpublished events
+				var count float64
+				err := p.Pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE published = false").Scan(&count)
+				if err == nil {
+					telemetry.OutboxUnpublishedCount.WithLabelValues(p.writer.Topic).Set(count)
+				}
+
+				// Query 2: Age of the oldest unpublished event
+				var oldestAgeSeconds float64
+				ageQuery := `
+					SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at))), 0) 
+					FROM outbox 
+					WHERE published = false
+				`
+				err = p.Pool.QueryRow(ctx, ageQuery).Scan(&oldestAgeSeconds)
+				if err == nil {
+					telemetry.OutboxOldestAge.WithLabelValues(p.writer.Topic).Set(oldestAgeSeconds)
+				}
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -85,8 +119,10 @@ func (p *Publisher) processBatch(ctx context.Context) {
 		err := p.PublishRaw(ctx, e.AggregateKey, e.EventType, e.Payload, uniqueId)
 		if err != nil {
 			slog.Error("Kafka publish failed, halting batch to preserve order", "Error:", err)
+			telemetry.OutboxPublishFailures.WithLabelValues(p.writer.Topic).Inc()
 			break // stop processing to prevent jumping ahead in queue
 		}
+
 		err = qtx.MarkOutboxEventPublished(ctx, e.ID)
 		if err != nil {
 			slog.Error("Failed to mark outbox event as published, halting the entire batch to preserve order", "Error:", err)

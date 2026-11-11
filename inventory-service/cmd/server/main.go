@@ -26,10 +26,6 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	router := gin.Default()
-	router.Use(telemetry.PromMiddleware())
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
 		log.Fatal("DATABASE_URL environment variable is not set")
@@ -40,10 +36,12 @@ func main() {
 
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
-		log.Fatalf("failed to connect to database : %v", err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
-
 	defer pool.Close()
+
+	telemetry.TrackDBPoolStats(ctx, pool)
 
 	dlqWriter := &kafkago.Writer{
 		// kafka doesn't use http, kafka.TCP tells the net package to open a socket at this port
@@ -68,6 +66,11 @@ func main() {
 
 	go consumer.Start(ctx)
 	go publisher.Start(ctx)
+
+	router := gin.New()
+	router.Use(gin.Recovery())
+	router.Use(telemetry.PromMiddleware())
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// public api endpoints
 	router.POST("/inventory", inventoryHandler.CreateInventory)

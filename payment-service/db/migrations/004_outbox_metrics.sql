@@ -1,0 +1,1 @@
+CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published = false;

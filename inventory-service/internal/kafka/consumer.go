@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"inventory-service/internal/store"
+	"inventory-service/internal/telemetry"
 	"log/slog"
 	"strconv"
 	"time"
@@ -20,6 +21,8 @@ type Consumer struct {
 	Pool      *pgxpool.Pool
 	DLQWriter *kafka.Writer
 }
+
+var ErrDuplicateEvent = errors.New("Duplicate or stale event")
 
 func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool, dlqWriter *kafka.Writer) *Consumer {
 	return &Consumer{
@@ -37,18 +40,45 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool
 
 // this function will keep running for eternity unless it gets stopped via context gracefully
 func (c *Consumer) Start(ctx context.Context) {
-	slog.Info("inventory consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+	topic := c.reader.Config().Topic
+	groupId := c.reader.Config().GroupID
+	slog.Info("inventory consumer starting", "topic", topic, "group", groupId)
+
+	go func() {
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := c.reader.Stats()
+				telemetry.ConsumerLag.WithLabelValues(topic, groupId).Set(float64(stats.Lag))
+			}
+		}
+
+	}()
 
 	for {
 		// 1. Fetch message without committing offset
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				slog.Info("inventory consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
+				slog.Info("inventory consumer context canceled, stopping read loop", "topic", topic)
 				return
 			}
-			slog.Error("failed to fetch message", "topic", c.reader.Config().Topic, "error", err)
+			slog.Error("failed to fetch message", "topic", topic, "error", err)
 			continue
+		}
+
+		start := time.Now()
+
+		var envelope EventEnvelope
+		_ = json.Unmarshal(msg.Value, envelope)
+		eventType := envelope.EventType
+		if eventType == "" {
+			eventType = "unknown"
 		}
 
 		// 2. Retry loop for message processing
@@ -77,6 +107,9 @@ func (c *Consumer) Start(ctx context.Context) {
 			}
 		}
 
+		duration := time.Since(start).Seconds()
+		telemetry.EventProcessingDuration.WithLabelValues(topic).Observe(duration)
+
 		if processErr != nil {
 			slog.Error("CRITICAL: inventory message processing failed after max retries; skipping and committing offset",
 				"topic", msg.Topic,
@@ -85,6 +118,14 @@ func (c *Consumer) Start(ctx context.Context) {
 				"error", processErr,
 			)
 			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retries: %v", maxRetries, processErr))
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq").Inc()
+			telemetry.DLQMessagesTotal.WithLabelValues(topic).Inc()
+		} else {
+			if errors.Is(processErr, ErrDuplicateEvent) {
+				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
+			} else {
+				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
+			}
 		}
 
 		// 3. Commit offset only after DB transaction finishes (or skipping poison pill)
@@ -128,7 +169,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		if rowsAffected == 0 {
 			// because we have added on conflict do nothing with execrows, we get back rowsAffected and can just actively check
 			slog.Info("idempotency check: event already processed, skipping", "event_id", envelope.EventID)
-			return nil
+			return ErrDuplicateEvent
 		}
 	}
 

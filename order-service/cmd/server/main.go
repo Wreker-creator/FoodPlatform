@@ -27,9 +27,6 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	router := gin.Default()
-	router.Use(telemetry.PromMiddleware())
-
 	connString := os.Getenv("DATABASE_URL")
 
 	if connString == "" {
@@ -42,10 +39,12 @@ func main() {
 
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
-
 	defer pool.Close()
+
+	telemetry.TrackDBPoolStats(ctx, pool)
 
 	queries := store.New(pool)
 	// producer := kafka.NewProducer("kafka:9094", "order-events")
@@ -74,6 +73,10 @@ func main() {
 	go inventoryEventsConsumer.Start(ctx)
 	go paymentEventsConsumer.Start(ctx)
 	go publisher.Start(ctx)
+
+	router := gin.New()
+	router.Use(gin.Recovery())
+	router.Use(telemetry.PromMiddleware())
 
 	// public api endpoints
 	router.POST("/orders", orderHandler.CreateOrder)

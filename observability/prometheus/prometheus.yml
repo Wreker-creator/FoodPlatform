@@ -9,6 +9,7 @@ scrape_configs:
           - 'order-service'
         type: 'A'
         port: 8080
+        refresh_interval: 5s
 
   # Inventory Service (Single instance)
   - job_name: 'inventory-service'

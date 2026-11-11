@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"payment-service/internal/store"
+	"payment-service/internal/telemetry"
 	"strconv"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
+
+var ErrDuplicateEvent = errors.New("Duplicate or stale event")
 
 type Consumer struct {
 	reader    *kafka.Reader
@@ -37,18 +40,48 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool
 }
 
 func (c *Consumer) Start(ctx context.Context) {
-	slog.Info("payment consumer starting", "topic", c.reader.Config().Topic, "group", c.reader.Config().GroupID)
+	topic := c.reader.Config().Topic
+	groupId := c.reader.Config().GroupID
+	slog.Info("payment consumer starting", "topic", topic, "group", groupId)
+
+	// our background concurrent tricker for consumer lag metric
+	go func() {
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := c.reader.Stats()
+				// display the internal lag to prometheus
+				telemetry.ConsumerLag.WithLabelValues(topic, groupId).Set(float64(stats.Lag))
+			}
+		}
+
+	}()
 
 	for {
-		// 1. Fetch message
+		// 1. Fetch message wihout committing offset
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				slog.Info("payment consumer context canceled, stopping read loop", "topic", c.reader.Config().Topic)
+				slog.Info("payment consumer context canceled, stopping read loop", "topic", topic)
 				return
 			}
-			slog.Error("failed to fetch message", "topic", c.reader.Config().Topic, "error", err)
+			slog.Error("failed to fetch message", "topic", topic, "error", err)
 			continue
+		}
+
+		// start timer for processing duration
+		start := time.Now()
+
+		var eventEnvelope EventEnvelope
+		_ = json.Unmarshal(msg.Value, &eventEnvelope)
+		eventType := eventEnvelope.EventType
+		if eventType == "" {
+			eventType = "unknown"
 		}
 
 		// 2. Retry loop
@@ -57,7 +90,8 @@ func (c *Consumer) Start(ctx context.Context) {
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			processErr = c.Read(ctx, msg)
-			if processErr == nil {
+			// we introduced this at the top, if found, break early
+			if processErr == nil || errors.Is(processErr, ErrDuplicateEvent) {
 				break
 			}
 
@@ -77,6 +111,11 @@ func (c *Consumer) Start(ctx context.Context) {
 			}
 		}
 
+		// record event processing duration
+		duration := time.Since(start).Seconds()
+		telemetry.EventProcessingDuration.WithLabelValues(topic).Observe(duration)
+
+		// normal flow resumes, where we handle persistent failure vs success and record outcome metrics
 		if processErr != nil {
 			slog.Error("CRITICAL: payment message processing failed after max retries; skipping and committing offset",
 				"topic", msg.Topic,
@@ -86,9 +125,19 @@ func (c *Consumer) Start(ctx context.Context) {
 			)
 
 			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retries: %v", maxRetries, processErr))
+
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq")
+			telemetry.DLQMessagesTotal.WithLabelValues(topic).Inc() //counter instance, we are counting yes
+		} else {
+			// differentiate between a normal "ok" vs "duplicate"
+			if errors.Is(processErr, ErrDuplicateEvent) {
+				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
+			} else {
+				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
+			}
 		}
 
-		// 3. Commit offset
+		// normal flow resumes, we continue with committing offset
 		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
 			slog.Error("failed to commit payment offset", "topic", msg.Topic, "offset", msg.Offset, "error", err)
@@ -132,7 +181,7 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		if rowsAffected == 0 {
 			// because we have added on conflict do nothing with execrows, we get back rowsAffected and can just actively check
 			slog.Info("idempotency check: event already processed, skipping", "event_id", envelope.EventID)
-			return nil
+			return ErrDuplicateEvent
 		}
 	}
 
