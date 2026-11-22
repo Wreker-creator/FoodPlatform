@@ -107,6 +107,14 @@ var (
 			Help: "Maximum allowed database connections in the pool",
 		},
 	)
+
+	PaymentsProcessedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "payments_processed_total",
+			Help: "Total number of payments processed by outcome",
+		},
+		[]string{"status"}, // "SUCCEEDED" or "FAILED"
+	)
 )
 
 func PromMiddleware() gin.HandlerFunc {

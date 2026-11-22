@@ -107,6 +107,21 @@ var (
 			Help: "Maximum allowed database connections in the pool",
 		},
 	)
+
+	OrdersCreatedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "orders_created_total",
+			Help: "Total number of orders created via HTTP POST /orders",
+		},
+	)
+
+	OrdersFinalStatusTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orders_final_status_total",
+			Help: "Total number of orders reaching a terminal state",
+		},
+		[]string{"status"}, // "CONFIRMED" or "CANCELLED"
+	)
 )
 
 func PromMiddleware() gin.HandlerFunc {

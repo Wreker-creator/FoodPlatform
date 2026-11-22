@@ -36,30 +36,6 @@ var (
 		},
 	)
 
-	OutboxUnpublishedCount = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "outbox_unpublished_events_total",
-			Help: "Number of events waiting to be published",
-		},
-		[]string{"topic"},
-	)
-
-	OutboxOldestAge = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "outbox_oldest_unpublished_age_seconds",
-			Help: "Age of the oldest unpublished event in seconds",
-		},
-		[]string{"topic"},
-	)
-
-	OutboxPublishFailures = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "outbox_publish_failures_total",
-			Help: "Total number of failed publish attempts",
-		},
-		[]string{"topic"},
-	)
-
 	EventsProcessedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "kafka_events_processed_total",

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"order-service/internal/kafka"
 	"order-service/internal/store"
+	"order-service/internal/telemetry"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -93,7 +94,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 		numericItemPrice, err := toNumeric(item.UnitPrice)
 		if err != nil {
-			slog.Error("Faile to convert unit price", "error", err)
+			slog.Error("Failed to convert unit price", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"Error": "Failed to convert unit price"})
 			return
 		}
@@ -161,6 +162,9 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"Error": "failed to create order"})
 		return
 	}
+
+	// need to add here instead of the consumers
+	telemetry.OrdersCreatedTotal.Inc()
 
 	c.JSON(http.StatusCreated, gin.H{
 		"Order": createdOrder,

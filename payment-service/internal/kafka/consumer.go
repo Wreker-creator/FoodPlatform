@@ -16,7 +16,10 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-var ErrDuplicateEvent = errors.New("Duplicate or stale event")
+var (
+	ErrDuplicateEvent = errors.New("duplicate or stale event")
+	ErrPoisonPill     = errors.New("poison pill: unrecoverable message format")
+)
 
 type Consumer struct {
 	reader    *kafka.Reader
@@ -90,12 +93,16 @@ func (c *Consumer) Start(ctx context.Context) {
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			processErr = c.Read(ctx, msg)
-			// we introduced this at the top, if found, break early
-			if processErr == nil || errors.Is(processErr, ErrDuplicateEvent) {
+
+			// 1st place: Break out of retry loop on nil OR duplicate event
+			if processErr == nil || errors.Is(processErr, ErrDuplicateEvent) || errors.Is(processErr, ErrPoisonPill) {
+				slog.Info("Found", "error:", processErr)
 				break
 			}
 
-			slog.Warn("retrying payment message processing",
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "retry").Inc()
+
+			slog.Warn("retrying notification message processing",
 				"attempt", attempt,
 				"max_retries", maxRetries,
 				"topic", msg.Topic,
@@ -115,26 +122,27 @@ func (c *Consumer) Start(ctx context.Context) {
 		duration := time.Since(start).Seconds()
 		telemetry.EventProcessingDuration.WithLabelValues(topic).Observe(duration)
 
-		// normal flow resumes, where we handle persistent failure vs success and record outcome metrics
-		if processErr != nil {
+		// 2nd place: Only route to DLQ if it's a real error (NOT ErrDuplicateEvent)
+		switch {
+		case errors.Is(processErr, ErrPoisonPill):
+			// Already routed to DLQ inside Read(); just record the "dlq" status metric
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq").Inc()
+
+		case processErr != nil && !errors.Is(processErr, ErrDuplicateEvent):
 			slog.Error("CRITICAL: payment message processing failed after max retries; skipping and committing offset",
 				"topic", msg.Topic,
 				"offset", msg.Offset,
 				"key", string(msg.Key),
 				"error", processErr,
 			)
-
 			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retries: %v", maxRetries, processErr))
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq").Inc()
 
-			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq")
-			telemetry.DLQMessagesTotal.WithLabelValues(topic).Inc() //counter instance, we are counting yes
-		} else {
-			// differentiate between a normal "ok" vs "duplicate"
-			if errors.Is(processErr, ErrDuplicateEvent) {
-				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
-			} else {
-				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
-			}
+		case errors.Is(processErr, ErrDuplicateEvent):
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
+
+		default:
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
 		}
 
 		// normal flow resumes, we continue with committing offset
@@ -256,6 +264,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				return err
 			}
 
+			telemetry.PaymentsProcessedTotal.WithLabelValues("FAILED").Inc()
+
 			return nil
 		}
 
@@ -293,6 +303,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
+		telemetry.PaymentsProcessedTotal.WithLabelValues("SUCCEEDED").Inc()
+
 		return nil
 
 	default:
@@ -310,7 +322,6 @@ func toNumeric(value float64) (pgtype.Numeric, error) {
 }
 
 func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason string) {
-
 	dlqPayload := DLQMessage{
 		OriginalTopic: msg.Topic,
 		OriginalKey:   string(msg.Key),
@@ -327,9 +338,11 @@ func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason str
 	})
 
 	if err != nil {
-		slog.Error("CRITICAL: Failed to write to dlq", "ERROR:", err)
+		slog.Error("CRITICAL: failed to write to DLQ", "error", err)
 	} else {
-		slog.Info("Router poison pill to DLQ", "Key", string(msg.Key), "reason:", reason)
+		// Increment DLQMessagesTotal right where the DLQ write succeeds so both
+		// corrupt JSON envelopes and exhausted retries are counted once.
+		telemetry.DLQMessagesTotal.WithLabelValues(msg.Topic).Inc()
+		slog.Info("routed poison pill to DLQ", "key", string(msg.Key), "reason", reason)
 	}
-
 }

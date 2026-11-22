@@ -107,6 +107,13 @@ var (
 			Help: "Maximum allowed database connections in the pool",
 		},
 	)
+
+	InventoryRejectionsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "inventory_rejections_total",
+			Help: "Total number of inventory reservation rejections due to insufficient stock",
+		},
+	)
 )
 
 func PromMiddleware() gin.HandlerFunc {

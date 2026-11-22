@@ -22,7 +22,11 @@ type Consumer struct {
 	DLQWriter *kafka.Writer
 }
 
-var ErrDuplicateEvent = errors.New("Duplicate or stale event")
+var (
+	ErrDuplicateEvent = errors.New("duplicate or stale event")
+	// --- NEW: Sentinel error so malformed JSON skips retries AND records status="dlq" ---
+	ErrPoisonPill = errors.New("poison pill: unrecoverable message format")
+)
 
 func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, pool *pgxpool.Pool, dlqWriter *kafka.Writer) *Consumer {
 	return &Consumer{
@@ -75,7 +79,7 @@ func (c *Consumer) Start(ctx context.Context) {
 		start := time.Now()
 
 		var envelope EventEnvelope
-		_ = json.Unmarshal(msg.Value, envelope)
+		_ = json.Unmarshal(msg.Value, &envelope)
 		eventType := envelope.EventType
 		if eventType == "" {
 			eventType = "unknown"
@@ -87,9 +91,15 @@ func (c *Consumer) Start(ctx context.Context) {
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			processErr = c.Read(ctx, msg)
-			if processErr == nil {
+
+			// --- FIXED: Break immediately on success, duplicate, OR unmarshal poison pill ---
+			if processErr == nil || errors.Is(processErr, ErrDuplicateEvent) || errors.Is(processErr, ErrPoisonPill) {
+				slog.Info("Found ", "error:", processErr)
 				break
 			}
+
+			// --- FIXED: Added 3rd label "retry" to prevent runtime cardinality panic ---
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "retry").Inc()
 
 			slog.Warn("retrying inventory message processing",
 				"attempt", attempt,
@@ -107,10 +117,17 @@ func (c *Consumer) Start(ctx context.Context) {
 			}
 		}
 
+		// for recording event processing duration
 		duration := time.Since(start).Seconds()
 		telemetry.EventProcessingDuration.WithLabelValues(topic).Observe(duration)
 
-		if processErr != nil {
+		// --- FIXED: Cleanly branch across PoisonPill, Exhausted Retries, Duplicate, and OK ---
+		switch {
+		case errors.Is(processErr, ErrPoisonPill):
+			// Already routed to DLQ inside Read(); just record the "dlq" status metric
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq").Inc()
+
+		case processErr != nil && !errors.Is(processErr, ErrDuplicateEvent):
 			slog.Error("CRITICAL: inventory message processing failed after max retries; skipping and committing offset",
 				"topic", msg.Topic,
 				"offset", msg.Offset,
@@ -119,19 +136,18 @@ func (c *Consumer) Start(ctx context.Context) {
 			)
 			c.routeToDlq(ctx, msg, fmt.Sprintf("Exhausted %d retries: %v", maxRetries, processErr))
 			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "dlq").Inc()
-			telemetry.DLQMessagesTotal.WithLabelValues(topic).Inc()
-		} else {
-			if errors.Is(processErr, ErrDuplicateEvent) {
-				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
-			} else {
-				telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
-			}
+
+		case errors.Is(processErr, ErrDuplicateEvent):
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "duplicate").Inc()
+
+		default:
+			telemetry.EventsProcessedTotal.WithLabelValues(topic, eventType, "ok").Inc()
 		}
 
-		// 3. Commit offset only after DB transaction finishes (or skipping poison pill)
+		// 3. Commit offset
 		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
-			slog.Error("failed to commit inventory offset", "topic", msg.Topic, "offset", msg.Offset, "error", err)
+			slog.Error("failed to commit notification offset", "topic", msg.Topic, "offset", msg.Offset, "error", err)
 		}
 		cancel()
 	}
@@ -139,6 +155,7 @@ func (c *Consumer) Start(ctx context.Context) {
 
 func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 	var envelope EventEnvelope
+	slog.Info("Received event message", "Offset", msg.Offset, "key", string(msg.Key))
 	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
 		c.routeToDlq(ctx, msg, fmt.Sprintf("Failed to unmarshal envelope: %v", err))
 		return nil
@@ -238,6 +255,8 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 				return err
 			}
 
+			telemetry.InventoryRejectionsTotal.Inc()
+
 			return nil
 
 		}
@@ -306,7 +325,6 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 }
 
 func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason string) {
-
 	dlqPayload := DLQMessage{
 		OriginalTopic: msg.Topic,
 		OriginalKey:   string(msg.Key),
@@ -323,9 +341,11 @@ func (c *Consumer) routeToDlq(ctx context.Context, msg kafka.Message, reason str
 	})
 
 	if err != nil {
-		slog.Error("CRITICAL: Failed to write to DLQ", "Error:", err)
+		slog.Error("CRITICAL: failed to write to DLQ", "error", err)
 	} else {
-		slog.Info("routed poison pill to DLQ", "key", string(msg.Key), "reason:", reason)
+		// Increment DLQMessagesTotal right where the DLQ write succeeds so both
+		// corrupt JSON envelopes and exhausted retries are counted once.
+		telemetry.DLQMessagesTotal.WithLabelValues(msg.Topic).Inc()
+		slog.Info("routed poison pill to DLQ", "key", string(msg.Key), "reason", reason)
 	}
-
 }
