@@ -16,6 +16,7 @@ type DLQMessage struct {
 type EventEnvelope struct {
 	EventType string          `json:"event_type"`
 	Payload   json.RawMessage `json:"payload"`
+	EventID   string          `json:"event_id"`
 }
 
 type OrderCancelledEvent struct {

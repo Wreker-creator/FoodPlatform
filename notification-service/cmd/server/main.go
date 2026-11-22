@@ -70,15 +70,14 @@ func main() {
 	queries := store.New(pool)
 	notificationsHandler := handler.NewNotificationsHandler(queries)
 
-	consumer := kafka.NewConsumer("kafka:9094", "order-events", "notification-order-group", queries, dlqWriter)
+	consumer := kafka.NewConsumer("kafka:9094", "order-events", "notification-order-group", queries, dlqWriter, pool)
 	go consumer.Start(ctx)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
-
 	router.Use(telemetry.PromMiddleware())
-	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	router.GET("/notifications/:id", notificationsHandler.GetNotificationsById)
 
 	srv := &http.Server{

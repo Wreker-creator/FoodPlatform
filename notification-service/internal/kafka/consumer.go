@@ -10,6 +10,7 @@ import (
 	"notification-service/internal/telemetry"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -22,9 +23,10 @@ type Consumer struct {
 	reader    *kafka.Reader
 	queries   *store.Queries
 	DLQWriter *kafka.Writer
+	Pool      *pgxpool.Pool
 }
 
-func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, dlqwriter *kafka.Writer) *Consumer {
+func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, dlqwriter *kafka.Writer, pool *pgxpool.Pool) *Consumer {
 	return &Consumer{
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     []string{brokerAddr},
@@ -34,6 +36,7 @@ func NewConsumer(brokerAddr, topic, groupID string, queries *store.Queries, dlqw
 		}),
 		queries:   queries,
 		DLQWriter: dlqwriter,
+		Pool:      pool,
 	}
 }
 
@@ -87,7 +90,6 @@ func (c *Consumer) Start(ctx context.Context) {
 
 			// --- FIXED: Break immediately on success, duplicate, OR unmarshal poison pill ---
 			if processErr == nil || errors.Is(processErr, ErrDuplicateEvent) || errors.Is(processErr, ErrPoisonPill) {
-				slog.Info("Found ", "error:", processErr)
 				break
 			}
 
@@ -156,6 +158,38 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 		return ErrPoisonPill
 	}
 
+	if envelope.EventType != "OrderConfirmed" && envelope.EventType != "OrderCancelled" {
+		return nil
+	}
+
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		slog.Error("Failed to beign transactions", "error:", err)
+		return err
+	}
+
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+	qtx := c.queries.WithTx(tx)
+
+	// idempotency check
+	if envelope.EventID == "" {
+		slog.Warn("Event missing eventId, cannot gurantee idempotency", "offset", msg.Offset)
+	} else {
+		rowsAffected, err := qtx.InsertProcessedEvent(ctx, envelope.EventID)
+		if err != nil {
+			slog.Error("Failed to insert processed event", "error:", err)
+			return err
+		}
+
+		if rowsAffected == 0 {
+			slog.Info("Idempotency check: event already processed, skipping", "event_id", envelope.EventID)
+			return ErrDuplicateEvent
+		}
+
+	}
+
 	switch envelope.EventType {
 	case "OrderConfirmed":
 		var event OrderConfirmedEvent
@@ -164,12 +198,18 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 			return err
 		}
 
-		_, err := c.queries.CreateNotification(ctx, store.CreateNotificationParams{
+		_, err := qtx.CreateNotification(ctx, store.CreateNotificationParams{
 			OrderID: event.OrderId,
 			Message: "Order Confirmed, on it's way to you",
 		})
+
 		if err != nil {
 			slog.Error("Failed to create notification for OrderConfirmed", "error", err)
+			return err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit notification for order confirmation", "Error:", err)
 			return err
 		}
 
@@ -185,12 +225,18 @@ func (c *Consumer) Read(ctx context.Context, msg kafka.Message) error {
 
 		orderCancelledReason := "Your order got cancelled due to " + event.Reason
 
-		_, err := c.queries.CreateNotification(ctx, store.CreateNotificationParams{
+		_, err := qtx.CreateNotification(ctx, store.CreateNotificationParams{
 			OrderID: event.OrderId,
 			Message: orderCancelledReason,
 		})
+
 		if err != nil {
 			slog.Error("Failed to create notification for OrderCancelled", "error", err)
+			return err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("Failed to commit notification for order cancelled", "Error:", err)
 			return err
 		}
 

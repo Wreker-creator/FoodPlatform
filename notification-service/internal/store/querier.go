@@ -11,6 +11,7 @@ import (
 type Querier interface {
 	CreateNotification(ctx context.Context, arg CreateNotificationParams) (Notification, error)
 	GetNotificationsByOrderId(ctx context.Context, orderID int32) ([]Notification, error)
+	InsertProcessedEvent(ctx context.Context, eventID string) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)
